@@ -1,0 +1,10 @@
+node_modules/
+dist/
+output/
+*.tsbuildinfo
+.sites/
+*.tgz
+*.tar.gz
+.env*
+.playwright-cli/
+.sites-runtime/

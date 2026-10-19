@@ -1,0 +1,1 @@
+Chess pieces by Colin M. L. Burnett, CC BY-SA 3.0. Source: https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces ; distributed by https://github.com/lichess-org/lila/tree/master/public/piece/cburnett
