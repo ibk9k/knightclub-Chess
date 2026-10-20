@@ -8,3 +8,6 @@ output/
 .env*
 .playwright-cli/
 .sites-runtime/
+.wrangler/
+.vinext/
+.next/

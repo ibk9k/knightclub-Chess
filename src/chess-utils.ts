@@ -63,6 +63,10 @@ export function gameOutcome(c: Chess): string | null {
 }
 export function clockText(ms: number): string { const sec = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
 export function evalText(e?: Evaluation | null): string { if (!e) return '0.0'; if (e.mate !== null) return `${e.cp > 0 ? '+' : '−'}M${Math.abs(e.mate)}`; return `${e.cp > 0 ? '+' : ''}${(e.cp / 100).toFixed(1)}`; }
+export function materialAdvantage(position: Chess, color: Color): number {
+  const values = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+  return position.board().flat().reduce((total, piece) => total + (piece ? values[piece.type] * (piece.color === color ? 1 : -1) : 0), 0);
+}
 export function openingName(records: MoveRecord[]): string {
   const moves = records.map(m => m.san).join(' ');
   if (moves.startsWith('e4 e5 Nf3 Nc6 Bb5')) return 'Ruy Lopez';
