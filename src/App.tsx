@@ -87,8 +87,13 @@ function App() {
   useEffect(() => { if (online.restoring) { setMode('online'); setTab('game'); } }, [online.restoring]);
 
   useEffect(() => {
-    const room = online.room;
-    if (!room || (syncedOnline.current.code === room.code && syncedOnline.current.version === room.version)) return;
+    const confirmed = online.room;
+    if (!confirmed) return;
+    const move = online.pendingMove;
+    // Only the displayed board is predicted. Clocks, results, room versions,
+    // and subsequent requests keep using the confirmed server snapshot.
+    const room = move && move.code === confirmed.code && move.round === confirmed.round && move.version === confirmed.version
+      ? { ...confirmed, fen: move.fen, moves: move.moves } : confirmed;
     const newRoom = syncedOnline.current.code !== room.code || syncedOnline.current.round !== room.round;
     const sameMoves = room.moves.length === recordsRef.current.length && room.moves.every((move, index) => recordsRef.current[index].uci === move);
     if (!newRoom && sameMoves && game.current.fen() === room.fen && outcomeRef.current === room.outcome) {
@@ -109,7 +114,7 @@ function App() {
     setActiveTimeControl(room.timeControl); setSelected(null); setPromotion(null); setHint(null); setBusy(false); setReviewing(false);
     if (nextRecords.length < recordsRef.current.length) setReviewIndex(null);
     if (newRoom) { setFlipped(room.seat === 'b'); setReviewIndex(null); setTab(room.cheatMode ? 'analysis' : 'game'); savedId.current = null; }
-  }, [online.room]);
+  }, [online.room, online.pendingMove]);
 
   useEffect(() => {
     if (mode !== 'online' || !online.room) return;
