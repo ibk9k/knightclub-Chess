@@ -57,6 +57,7 @@ async (page) => {
     assert(await page.locator('.room-code-box strong').textContent() === code, 'A rematch keeps the same private room');
     assert(await page.locator('.online-seats strong').textContent() === 'You play black' && await guest.locator('.online-seats strong').textContent() === 'You play white', 'Both original players stay and colors switch');
     assert(await page.locator('.move-cell').count() === 0 && await page.locator('.game-result').count() === 0, 'The rematch resets moves, result, and animations');
+    assert(await guest.evaluate(code => sessionStorage.getItem(`knight-club-celebrated:${code}:2`) === null, code), 'The previous win cannot consume the next round’s celebration');
     await play(guest, 'e2', 'e4');
     await page.getByRole('button', { name: 'e4 white pawn', exact: true }).waitFor();
     await play(page, 'e7', 'e5');

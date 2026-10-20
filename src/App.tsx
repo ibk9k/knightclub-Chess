@@ -402,7 +402,7 @@ function App() {
   const topColor: Color = flipped ? 'w' : 'b';
   const bottomColor: Color = flipped ? 'b' : 'w';
   const isBot = (color: Color) => mode === 'bot' && color !== side;
-  const result = mode !== 'analysis' ? presentResult(outcome, mode === 'local' ? null : side) : null;
+  const result = mode !== 'analysis' && (mode !== 'online' || online.room?.status === 'finished' && online.room.outcome === outcome && online.room.seat === side) ? presentResult(outcome, mode === 'local' ? null : side) : null;
   const resultGameId = mode === 'online' && online.room ? `${online.room.code}:${online.room.round}` : localGameId.current;
   const rematch = mode !== 'online' || !online.room?.rematchOffer ? 'none' : online.room.rematchOffer === side ? 'sent' : 'received';
   const capturePieces = (color: Color) => {
