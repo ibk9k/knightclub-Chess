@@ -1,7 +1,13 @@
 import { ENGINE_PATH } from './engine-path';
 import type { Evaluation } from './chess-utils';
 
-interface SearchOptions { depth?: number; time?: number; skill?: number }
+interface SearchOptions {
+  depth?: number;
+  time?: number;
+  skill?: number;
+  onUpdate?: (evaluation: Evaluation) => void;
+  signal?: AbortSignal;
+}
 export class StockfishEngine {
   private worker: Worker;
   private ready: Promise<void>;
@@ -30,20 +36,41 @@ export class StockfishEngine {
     const task = this.queue.catch(() => {}).then(async () => {
       await this.ready;
       if (this.closed) throw new Error('Engine closed');
+      if (options.signal?.aborted) throw new DOMException('Analysis cancelled', 'AbortError');
       return new Promise<Evaluation>((resolve, reject) => {
         let result: Evaluation = { cp: 0, mate: null, bestMove: '', pv: [], depth: 0 };
+        let cancelled = false;
         const sign = fen.split(' ')[1] === 'w' ? 1 : -1;
-        const timer = setTimeout(() => { this.worker.postMessage('stop'); this.handler = null; this.closed = true; this.worker.terminate(); reject(new Error('Engine search timed out. Please retry.')); }, 15000);
-        this.rejectActive = reject;
+        const finish = (error?: Error, evaluation?: Evaluation) => {
+          clearTimeout(timer);
+          options.signal?.removeEventListener('abort', abort);
+          this.handler = null;
+          this.rejectActive = null;
+          if (error) reject(error); else resolve(evaluation!);
+        };
+        const abort = () => {
+          if (cancelled) return;
+          cancelled = true;
+          // Drain bestmove before accepting the next search, so an old result
+          // can never be mistaken for the next position's result.
+          this.worker.postMessage('stop');
+        };
+        const timer = setTimeout(() => { this.closed = true; this.worker.terminate(); finish(new Error('Engine search timed out. Please retry.')); }, 15000);
+        this.rejectActive = error => finish(error);
+        options.signal?.addEventListener('abort', abort, { once: true });
         this.handler = line => {
           if (line.startsWith('info depth')) {
             const depth = /\bdepth (\d+)/.exec(line), score = /\bscore (cp|mate) (-?\d+)/.exec(line), pv = /\bpv (.+)/.exec(line);
             if (score && pv) {
               const raw = Number(score[2]), mate = score[1] === 'mate' ? raw * sign : null;
-              result = { cp: mate === null ? raw * sign : (mate > 0 ? 10000 : -10000), mate, depth: Number(depth?.[1] || 0), pv: pv[1].split(' '), bestMove: pv[1].split(' ')[0] };
+              result = { cp: mate === null ? raw * sign : mate === 0 ? -10000 * sign : (mate > 0 ? 10000 : -10000), mate, depth: Number(depth?.[1] || 0), pv: pv[1].split(' '), bestMove: pv[1].split(' ')[0] };
+              if (!cancelled) options.onUpdate?.(result);
             }
           }
-          if (line.startsWith('bestmove')) { clearTimeout(timer); this.handler = null; this.rejectActive = null; resolve({ ...result, bestMove: line.split(' ')[1] }); }
+          if (line.startsWith('bestmove')) {
+            if (cancelled) finish(new DOMException('Analysis cancelled', 'AbortError'));
+            else finish(undefined, { ...result, bestMove: line.split(' ')[1] });
+          }
         };
         this.worker.postMessage(`setoption name Skill Level value ${options.skill ?? 20}`);
         this.worker.postMessage(`position fen ${fen}`);

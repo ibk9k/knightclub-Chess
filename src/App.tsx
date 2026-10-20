@@ -4,6 +4,7 @@ import { Chess } from 'chess.js';
 import type { Color, PieceSymbol, Square } from 'chess.js';
 import { ArrowDownUp, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, BookOpen, Check, ChevronDown, ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, CircleHelp, Clock3, Cpu, Download, Flag, Gamepad2, Heart, History, Lightbulb, LoaderCircle, Menu, MoreHorizontal, Play, RotateCcw, Settings2, ShieldCheck, Sparkles, Swords, Target, Trophy, Upload, Users, Volume2, VolumeX, X } from 'lucide-react';
 import { StockfishEngine } from './engine';
+import { useLiveAnalysis } from './use-live-analysis';
 import { BOTS, QUALITY_SYMBOL, START_FEN, classifyMove, clockText, evalText, explainMove, gameOutcome, makeUci, openingName, pvToSan, toSan, uci } from './chess-utils';
 import type { Bot, Evaluation, MoveRecord, Quality } from './chess-utils';
 
@@ -32,7 +33,7 @@ function App() {
   const [side, setSide] = useState<Color>('w');
   const [chosenSide, setChosenSide] = useState<'w' | 'b' | 'random'>('w');
   const [flipped, setFlipped] = useState(false);
-  const [tab, setTab] = useState<'game' | 'analysis'>('game');
+  const [tab, setTab] = useState<'game' | 'analysis'>('analysis');
   const [selected, setSelected] = useState<Square | null>(null);
   const [reviewIndex, setReviewIndex] = useState<number | null>(null);
   const [engineStatus, setEngineStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -40,7 +41,6 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [reviewProgress, setReviewProgress] = useState(0);
-  const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const [outcome, setOutcome] = useState<string | null>(null);
@@ -80,14 +80,9 @@ function App() {
     engine.current = current;
     let mounted = true;
     setEngineStatus('loading');
-    current.loaded().then(async () => {
+    current.loaded().then(() => {
       if (!mounted) return;
       setEngineStatus('ready'); setEngineMessage('');
-      const currentFen = game.current.fen();
-      const result = await current.search(currentFen);
-      if (!mounted) return;
-      evaluations.current.set(currentFen, result);
-      if (game.current.fen() === currentFen) setEvaluation(result);
     }).catch(error => { if (mounted) { setEngineStatus('error'); setEngineMessage(error.message); } });
     return () => { mounted = false; current.terminate(); };
   }, [engineRetry]);
@@ -164,7 +159,6 @@ function App() {
     const judgment = classifyMove(before, after, record.color, record.uci);
     const updated = { ...record, ...judgment, evaluation: after, bestSan: toSan(record.before, before.bestMove) };
     setRecords(prev => prev.map(r => r === record ? updated : r));
-    setEvaluation(after);
     return after;
   };
 
@@ -224,7 +218,8 @@ function App() {
   const legalMoves = selected && isPlayable ? position.moves({ square: selected, verbose: true }) : [];
   const shownRecord = reviewIndex === null ? records.at(-1) : records[reviewIndex - 1];
   const coachRecord = reviewIndex === null && mode === 'bot' ? [...records].reverse().find(r => r.color === side) : shownRecord;
-  const shownEval = reviewIndex === null ? evaluation : reviewIndex === 0 ? evaluations.current.get(initialFen) : shownRecord?.evaluation;
+  const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !reviewing && engineStatus === 'ready');
+  const shownEval = liveAnalysis.evaluation || evaluations.current.get(boardFen) || shownRecord?.evaluation;
   const shownLast = shownRecord?.uci;
 
   const onSquare = (square: Square) => {
@@ -238,7 +233,7 @@ function App() {
   const beginGame = async (newMode: Mode = mode) => {
     const token = ++generation.current;
     const playerSide = chosenSide === 'random' ? Math.random() < 0.5 ? 'w' : 'b' : chosenSide;
-    game.current = new Chess(); setInitialFen(START_FEN); setFen(START_FEN); setRecords([]); setMode(newMode); setSide(playerSide); setFlipped(playerSide === 'b'); setBot(selectedBot); setSelected(null); setReviewIndex(null); setOutcome(null); outcomeRef.current = null; setHint(null); setEvaluation(evaluations.current.get(START_FEN) || null); setDialog(null); setPendingMode(null); setBusy(false); setReviewing(false); setTab(newMode === 'analysis' ? 'analysis' : 'game'); setActiveTimeControl(newMode === 'analysis' ? 0 : timeControl); setClocks({ w: timeControl * 60000, b: timeControl * 60000 }); savedId.current = null;
+    game.current = new Chess(); setInitialFen(START_FEN); setFen(START_FEN); setRecords([]); setMode(newMode); setSide(playerSide); setFlipped(playerSide === 'b'); setBot(selectedBot); setSelected(null); setReviewIndex(null); setOutcome(null); outcomeRef.current = null; setHint(null); setDialog(null); setPendingMode(null); setBusy(false); setReviewing(false); setTab(newMode === 'local' ? 'game' : 'analysis'); setActiveTimeControl(newMode === 'analysis' ? 0 : timeControl); setClocks({ w: timeControl * 60000, b: timeControl * 60000 }); savedId.current = null;
     if (newMode === 'bot' && playerSide === 'b' && engineStatus === 'ready') {
       setBusy(true);
       try { await computerMove(token, selectedBot); } catch (error) { if (token === generation.current) handleEngineError(error); }
@@ -252,7 +247,7 @@ function App() {
     let count = 1;
     if (mode === 'bot' && records.length >= 2 && game.current.turn() === side) count = 2;
     for (let i = 0; i < count; i++) game.current.undo();
-    const nextFen = game.current.fen(); setFen(nextFen); setRecords(prev => prev.slice(0, -count)); setEvaluation(evaluations.current.get(nextFen) || null);
+    const nextFen = game.current.fen(); setFen(nextFen); setRecords(prev => prev.slice(0, -count));
   };
 
   const requestHint = async () => {
@@ -296,9 +291,7 @@ function App() {
       else { c.loadPgn(text.trim()); start = c.history({ verbose: true })[0]?.before || c.fen(); }
       const history = c.history({ verbose: true }).map(m => ({ san: m.san, uci: uci(m), before: m.before, after: m.after, color: m.color }));
       if (!text.trim()) throw new Error('Enter a PGN game or a FEN position.');
-      generation.current++; game.current = c; setInitialFen(start); setFen(c.fen()); setRecords(history); setMode('analysis'); setTab('analysis'); setBusy(false); setReviewing(false); setReviewIndex(null); setSelected(null); setHint(null); setEvaluation(null); setOutcome(gameOutcome(c)); setDialog(null); setInput(''); setInputError(''); savedId.current = 'imported';
-      const token = generation.current;
-      void evaluate(c.fen()).then(e => { if (token === generation.current) setEvaluation(e); }).catch(handleEngineError);
+      generation.current++; game.current = c; setInitialFen(start); setFen(c.fen()); setRecords(history); setMode('analysis'); setTab('analysis'); setBusy(false); setReviewing(false); setReviewIndex(null); setSelected(null); setHint(null); setOutcome(gameOutcome(c)); setDialog(null); setInput(''); setInputError(''); savedId.current = 'imported';
       notify('Game loaded. Run a review to analyze every move.');
     } catch (error) { setInputError(error instanceof Error ? error.message : 'That PGN or FEN could not be read.'); }
   };
@@ -388,7 +381,17 @@ function App() {
                   const lastMove = shownLast && [shownLast.slice(0, 2), shownLast.slice(2, 4)].includes(square);
                   const isHint = hint && [hint.slice(0, 2), hint.slice(2, 4)].includes(square);
                   const inCheck = piece?.type === 'k' && piece.color === position.turn() && position.isCheck();
-                  const onDragStart = (event: DragEvent<HTMLButtonElement>) => { if (!isPlayable || !piece || piece.color !== position.turn()) { event.preventDefault(); return; } event.dataTransfer.setData('text/plain', square); event.dataTransfer.effectAllowed = 'move'; setSelected(square); };
+                  const onDragStart = (event: DragEvent<HTMLButtonElement>) => {
+                    if (!isPlayable || !piece || piece.color !== position.turn()) { event.preventDefault(); return; }
+                    const image = event.currentTarget.querySelector<HTMLImageElement>('.piece');
+                    if (!image) { event.preventDefault(); return; }
+                    // Native dragging otherwise snapshots the entire square,
+                    // including its background, coordinates, and highlights.
+                    event.dataTransfer.setDragImage(image, image.width / 2, image.height / 2);
+                    event.dataTransfer.setData('text/plain', square);
+                    event.dataTransfer.effectAllowed = 'move';
+                    setSelected(square);
+                  };
                   return <button key={square} type="button" className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastMove ? 'last-move' : ''} ${isHint ? 'hint-square' : ''} ${inCheck ? 'check-square' : ''}`} aria-label={`${square}${piece ? ` ${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}` : ''}${legal ? ' legal destination' : ''}`} aria-pressed={selected === square} onClick={() => onSquare(square)} draggable={!!piece && isPlayable && piece.color === position.turn()} onDragStart={onDragStart} onDragOver={event => { if (isPlayable) event.preventDefault(); }} onDrop={event => { event.preventDefault(); const source = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(source)) tryMove(source as Square, square); }}>
                     {col === 0 && <span className="coordinate rank">{rank}</span>}{row === 7 && <span className="coordinate file">{'abcdefgh'[file]}</span>}
                     {piece && <img className="piece" src={`/pieces/${piece.color}${piece.type.toUpperCase()}.svg`} alt="" draggable={false} />}
@@ -415,8 +418,13 @@ function App() {
 
             <section className="moves-panel">
               <div className="panel-tabs" role="tablist" aria-label="Game information"><button role="tab" aria-selected={tab === 'game'} className={tab === 'game' ? 'active' : ''} onClick={() => setTab('game')}><Swords size={16} />Game</button><button role="tab" aria-selected={tab === 'analysis'} className={tab === 'analysis' ? 'active' : ''} onClick={() => setTab('analysis')}><BarChart3 size={16} />Analysis<span className="free-label">FREE</span></button></div>
-              {tab === 'game' ? <><div className="opening-label"><BookOpen size={14} /><span>{openingName(records)}</span>{records.length > 0 && <span className="move-count">{Math.ceil(records.length / 2)} moves</span>}</div><div className="move-list" ref={moveListRef}>{!records.length ? <div className="moves-empty"><div><KnightMark /></div><strong>The best stories start with a move.</strong><p>Your game will unfold here.<br />Select a piece to get started.</p></div> : Array.from({ length: Math.ceil(records.length / 2) }, (_, i) => <div className="move-pair" key={i}><span className="move-number">{i + 1}.</span>{[i * 2, i * 2 + 1].map(index => { const record = records[index]; return record ? <button key={index} className={`move-cell ${(reviewIndex ?? records.length) === index + 1 ? 'current' : ''}`} onClick={() => navigateReview(index + 1 === records.length ? null : index + 1)}><span>{record.san}</span>{record.quality && <span title={record.quality} className={`move-quality quality-${record.quality.toLowerCase()}`}>{QUALITY_SYMBOL[record.quality]}</span>}</button> : <span key={index} />; })}</div>)}</div></> : <div className="analysis-content"><div className="analysis-engine"><div><Cpu size={16} /><strong>Stockfish</strong><span className="engine-version">18</span></div><span><i className={busy ? 'pulse' : ''} />{busy ? 'Thinking' : shownEval ? `Depth ${shownEval.depth}` : 'Ready'}</span></div><div className="position-evaluation"><strong>{evalText(shownEval)}</strong><div><span>{shownEval?.mate !== null && shownEval?.mate !== undefined ? 'Forced checkmate' : !shownEval || Math.abs(shownEval.cp) < 40 ? 'An even position' : shownEval.cp > 0 ? 'White has the advantage' : 'Black has the advantage'}</span><small>Evaluation from White’s perspective</small></div></div><div className="evaluation-track"><span style={{ width: `${whitePercent}%` }} /></div><div className="best-line"><span>BEST CONTINUATION</span><div>{shownEval?.pv.length ? pvToSan(boardFen, shownEval.pv).map((m, i) => <span key={i} className={i === 0 ? 'first' : ''}>{m}</span>) : <span className="muted">{busy ? 'Finding the strongest line…' : 'Play a move to explore the position.'}</span>}</div></div>{analyzed.length > 0 && <><div className="accuracy-row"><div><span>White accuracy</span><strong>{accuracyFor('w')}</strong></div><div><span>Black accuracy</span><strong>{accuracyFor('b')}</strong></div></div><p className="accuracy-note">Estimated from evaluation loss · {analyzed.length}/{records.length} moves analyzed</p><div className="eval-chart" aria-label="Evaluation throughout the game">{records.map((r, i) => <button key={i} title={`${i + 1}. ${r.san}: ${evalText(r.evaluation)}`} aria-label={`Review move ${i + 1}, ${r.san}`} onClick={() => navigateReview(i + 1 === records.length ? null : i + 1)} style={{ '--bar': `${Math.max(3, Math.min(48, Math.abs(r.evaluation?.cp || 0) / 8))}%` } as CSSProperties} className={(r.evaluation?.cp || 0) >= 0 ? 'up' : 'down'}><span /></button>)}</div></>}
-                {shownRecord && <div className="analysis-judgment"><span className={`judgment-badge quality-${(shownRecord.quality || 'good').toLowerCase()}`}>{shownRecord.quality ? QUALITY_SYMBOL[shownRecord.quality] : '…'}</span><div><strong>{shownRecord.san} <span>{shownRecord.quality || 'Not analyzed yet'}</span></strong><p>{explainMove(shownRecord)}</p></div></div>}
+              {tab === 'game' ? <><div className="opening-label"><BookOpen size={14} /><span>{openingName(records)}</span>{records.length > 0 && <span className="move-count">{Math.ceil(records.length / 2)} moves</span>}</div><div className="move-list" ref={moveListRef}>{!records.length ? <div className="moves-empty"><div><KnightMark /></div><strong>The best stories start with a move.</strong><p>Your game will unfold here.<br />Select a piece to get started.</p></div> : Array.from({ length: Math.ceil(records.length / 2) }, (_, i) => <div className="move-pair" key={i}><span className="move-number">{i + 1}.</span>{[i * 2, i * 2 + 1].map(index => { const record = records[index]; return record ? <button key={index} className={`move-cell ${(reviewIndex ?? records.length) === index + 1 ? 'current' : ''}`} onClick={() => navigateReview(index + 1 === records.length ? null : index + 1)}><span>{record.san}</span>{record.quality && <span title={record.quality} className={`move-quality quality-${record.quality.toLowerCase()}`}>{QUALITY_SYMBOL[record.quality]}</span>}</button> : <span key={index} />; })}</div>)}</div></> : <div className="analysis-content"><div className="analysis-engine">
+                  <div><Cpu size={16} /><strong>Stockfish</strong><span className="engine-version">18</span></div>
+                  <span><i className={liveAnalysis.analyzing ? 'pulse' : ''} />{liveAnalysis.error ? 'Unavailable' : liveAnalysis.loading || engineStatus === 'loading' ? 'Loading…' : reviewing ? 'Reviewing…' : liveAnalysis.analyzing ? `Live · Depth ${shownEval?.depth || 0}` : shownEval ? `Depth ${shownEval.depth}` : 'Ready'}</span>
+                </div>
+                {liveAnalysis.error && <div className="live-analysis-error" role="alert"><span>Live analysis is unavailable.</span><button onClick={() => setEngineRetry(n => n + 1)}>Retry</button></div>}
+                <div className="position-evaluation"><strong>{evalText(shownEval)}</strong><div><span>{shownEval?.mate !== null && shownEval?.mate !== undefined ? 'Forced checkmate' : !shownEval || Math.abs(shownEval.cp) < 40 ? 'An even position' : shownEval.cp > 0 ? 'White has the advantage' : 'Black has the advantage'}</span><small>Evaluation from White’s perspective</small></div></div><div className="evaluation-track"><span style={{ width: `${whitePercent}%` }} /></div><div className="best-line"><span>BEST CONTINUATION</span><div>{shownEval?.pv.length ? pvToSan(boardFen, shownEval.pv).map((m, i) => <span key={i} className={i === 0 ? 'first' : ''}>{m}</span>) : <span className="muted">{liveAnalysis.analyzing || liveAnalysis.loading ? 'Finding the strongest line…' : position.isGameOver() ? 'Game over. Explore an earlier move.' : 'Play a move to explore the position.'}</span>}</div></div>{analyzed.length > 0 && <><div className="accuracy-row"><div><span>White accuracy</span><strong>{accuracyFor('w')}</strong></div><div><span>Black accuracy</span><strong>{accuracyFor('b')}</strong></div></div><p className="accuracy-note">Estimated from evaluation loss · {analyzed.length}/{records.length} moves analyzed</p><div className="eval-chart" aria-label="Evaluation throughout the game">{records.map((r, i) => <button key={i} title={`${i + 1}. ${r.san}: ${evalText(r.evaluation)}`} aria-label={`Review move ${i + 1}, ${r.san}`} onClick={() => navigateReview(i + 1 === records.length ? null : i + 1)} style={{ '--bar': `${Math.max(3, Math.min(48, Math.abs(r.evaluation?.cp || 0) / 8))}%` } as CSSProperties} className={(r.evaluation?.cp || 0) >= 0 ? 'up' : 'down'}><span /></button>)}</div></>}
+                {coachRecord && <div className="analysis-judgment"><span className={`judgment-badge quality-${(coachRecord.quality || 'good').toLowerCase()}`}>{coachRecord.quality ? QUALITY_SYMBOL[coachRecord.quality] : '…'}</span><div><span className="analysis-move-label">{mode === 'bot' && reviewIndex === null ? 'Your last move' : 'Selected move'}</span><strong>{coachRecord.san} <span>{coachRecord.quality || 'Not analyzed yet'}</span></strong><p>{explainMove(coachRecord)}</p></div></div>}
                 <button className="review-button secondary-button" disabled={!records.length || busy || reviewing || engineStatus !== 'ready'} onClick={() => void reviewGame()}>{reviewing ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{reviewing ? `Reviewing · ${reviewProgress}%` : 'Review full game'}<ArrowRight size={16} /></button>
               </div>}
               <div className="move-navigation"><button aria-label="First position" disabled={!records.length || reviewIndex === 0} onClick={() => navigateReview(0)}><ChevronFirst size={19} /></button><button aria-label="Previous move" disabled={!records.length || reviewIndex === 0} onClick={() => navigateReview(Math.max(0, (reviewIndex ?? records.length) - 1))}><ChevronLeft size={21} /></button><button aria-label="Next move" disabled={!records.length || reviewIndex === null} onClick={() => navigateReview((reviewIndex || 0) + 1 >= records.length ? null : (reviewIndex || 0) + 1)}><ChevronRight size={21} /></button><button aria-label="Latest position" disabled={!records.length || reviewIndex === null} onClick={() => navigateReview(null)}><ChevronLast size={19} /></button>{reviewIndex !== null && <button className="return-live" onClick={() => navigateReview(null)}>Live <span /></button>}</div>

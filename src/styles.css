@@ -269,6 +269,8 @@ main { margin-left: 214px; }
 .engine-version { color: var(--subtle); font-size: 9px; }
 .analysis-engine > span { display: flex; align-items: center; gap: 5px; color: var(--subtle); font-size: 8px; }
 .analysis-engine i { width: 4px; height: 4px; background: var(--green); border-radius: 50%; }
+.live-analysis-error { display: flex; justify-content: space-between; gap: 10px; font-size: 10px; color: var(--danger); margin-top: 12px; }
+.live-analysis-error button { text-decoration: underline; text-underline-offset: 3px; }
 .position-evaluation { display: flex; gap: 14px; align-items: center; padding: 18px 0 13px; }
 .position-evaluation > strong { font-size: 27px; font-weight: 600; letter-spacing: -.7px; font-variant-numeric: tabular-nums; }
 .position-evaluation > div { display: flex; flex-direction: column; gap: 4px; }
@@ -295,6 +297,7 @@ main { margin-left: 214px; }
 .analysis-judgment { display: flex; gap: 9px; border-top: 1px solid var(--line); padding-top: 12px; }
 .judgment-badge { display: grid; place-items: center; border-radius: 50%; width: 24px; height: 24px; font-size: 12px; flex-shrink: 0; font-weight: 750; }
 .analysis-judgment strong { font-size: 10px; font-weight: 650; }
+.analysis-move-label { display: block; font-size: 8px; color: var(--muted); margin-bottom: 5px; }
 .analysis-judgment strong > span { color: var(--green); font-weight: 450; margin-left: 5px; }
 .analysis-judgment p { margin-top: 5px; font-size: 9px; color: var(--muted); line-height: 1.7; }
 .secondary-button { display: inline-flex; min-height: 37px; align-items: center; justify-content: center; gap: 8px; color: var(--text); background: var(--surface-raised); border: 1px solid oklch(0.4 0.01 125); border-radius: 5px; padding: 9px 13px; font-size: 10px; font-weight: 500; }
