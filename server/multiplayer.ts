@@ -20,6 +20,7 @@ interface RoomRow {
   white_ms: number; black_ms: number; turn_started_at: number | null;
   white_seen: number; black_seen: number; draw_offer: Color | null;
   outcome: string | null; created_at: number; updated_at: number;
+  rematch_offer: Color | null; round: number;
 }
 const COOKIE = 'kc_player';
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -82,7 +83,7 @@ function snapshot(room: RoomRow, seat: Color, now: number): OnlineRoom {
     connected: { w: !!room.white_key && now - room.white_seen < 20_000, b: !!room.black_key && now - room.black_seen < 20_000 },
     moves: JSON.parse(room.moves), fen: room.fen, version: room.version, timeControl: room.time_control,
     clocks: clocksAt(room, now), clockRunning: room.status === 'active' && room.turn_started_at !== null && room.time_control > 0,
-    serverNow: now, drawOffer: room.draw_offer, outcome: room.outcome };
+    serverNow: now, drawOffer: room.draw_offer, outcome: room.outcome, rematchOffer: room.rematch_offer, round: room.round };
 }
 async function claimRoom(db: RoomDatabase, room: RoomRow, key: string, name: string, now: number) {
   const existing = seatFor(room, key);
@@ -161,7 +162,8 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
     if (seat === 'w') room.white_seen = now; else room.black_seen = now;
     if (request.method === 'GET' && path.length === 2 || request.method === 'POST' && path[2] === 'join') return reply(snapshot(room, seat, now));
     if (request.method !== 'POST') throw new RoomError('Not found.', 404);
-    if (body.version !== room.version) throw new RoomError('The game has changed. Refreshing the board; please try again.', 409);
+    const mutualRematch = path[2] === 'action' && body.action === 'request-rematch' && room.status === 'finished' && room.rematch_offer === opposite(seat);
+    if (body.version !== room.version && !mutualRematch) throw new RoomError('The game has changed. Refreshing the board; please try again.', 409);
     if (path[2] === 'move') {
       if (room.status !== 'active') throw new RoomError('Wait for your opponent to join before moving.', 409);
       const chess = new Chess(), moves: string[] = JSON.parse(room.moves);
@@ -176,6 +178,21 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
         .bind(JSON.stringify(moves), chess.fen(), result ? 'finished' : 'active', result, clocks.w, clocks.b, now, room.draw_offer === opposite(seat) ? null : room.draw_offer, now, room.code, room.version).run();
       if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
     } else if (path[2] === 'action') {
+      if (['request-rematch', 'accept-rematch', 'decline-rematch'].includes(String(body.action))) {
+        if (room.status !== 'finished' || !room.white_key || !room.black_key) throw new RoomError('Finish this game before requesting a rematch.', 409);
+        const accepting = body.action === 'accept-rematch' || mutualRematch;
+        if (accepting || body.action === 'decline-rematch') {
+          if (room.rematch_offer !== opposite(seat)) throw new RoomError('There is no rematch request to respond to.', 409);
+        } else if (room.rematch_offer) throw new RoomError('Your rematch request is already waiting.', 409);
+        const changed = accepting
+          ? await db.prepare("UPDATE chess_rooms SET white_key = black_key, black_key = white_key, white_name = black_name, black_name = white_name, white_seen = black_seen, black_seen = white_seen, moves = '[]', fen = ?, status = 'active', outcome = NULL, draw_offer = NULL, rematch_offer = NULL, white_ms = ?, black_ms = ?, turn_started_at = NULL, round = round + 1, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'finished'")
+            .bind(new Chess().fen(), room.time_control * 60_000, room.time_control * 60_000, now, room.code, room.version).run()
+          : await db.prepare("UPDATE chess_rooms SET rematch_offer = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'finished'")
+            .bind(body.action === 'decline-rematch' ? null : seat, now, room.code, room.version).run();
+        if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
+        const next = await readRoom(db, room.code);
+        return reply(snapshot(next, seatFor(next, key)!, now));
+      }
       let status = room.status, outcome = room.outcome, offer = room.draw_offer;
       switch (body.action) {
         case 'cancel': if (status !== 'waiting') throw new RoomError('The game has already started.', 409); status = 'cancelled'; outcome = 'Room closed'; break;

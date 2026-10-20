@@ -1,7 +1,3 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
-export {};
 import { sql } from 'drizzle-orm';
 import { integer, sqliteTable, text, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
@@ -24,6 +20,8 @@ export const chessRooms = sqliteTable('chess_rooms', {
   blackSeen: integer('black_seen').notNull(),
   drawOffer: text('draw_offer'),
   outcome: text('outcome'),
+  rematchOffer: text('rematch_offer'),
+  round: integer('round').notNull().default(1),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 }, table => [

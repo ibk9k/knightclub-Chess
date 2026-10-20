@@ -27,6 +27,7 @@
   --z-backdrop: 30;
   --z-navigation: 40;
   --z-toast: 60;
+  --z-board-effects: 5;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 340px; }
@@ -43,6 +44,26 @@ p { text-wrap: pretty; }
 svg { flex-shrink: 0; stroke-width: 1.8; }
 .app-shell { min-height: 100vh; --square-light: oklch(0.875 0.031 115); --square-dark: oklch(0.58 0.074 125); }
 .material-advantage { margin-left: 7px; font-size: 12px; font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums; }
+.board-confetti { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: var(--z-board-effects); container-type: size; }
+.board-confetti i { position: absolute; left: var(--confetti-x); top: -18px; width: 7px; height: 12px; background: var(--confetti-color); border-radius: 1px; animation: victory-confetti var(--confetti-duration) var(--confetti-delay) cubic-bezier(.18,.6,.5,1) both; }
+.board-confetti i:nth-child(3n) { width: 6px; height: 6px; border-radius: 50%; }
+@keyframes victory-confetti { 0% { transform: translate3d(0, 0, 0) rotate(0); opacity: 0; } 8% { opacity: 1; } 80% { opacity: 1; } 100% { transform: translate3d(var(--confetti-drift), 115cqh, 0) rotate(var(--confetti-spin)); opacity: 0; } }
+.game-result { margin: 16px 0 0 25px; padding: 19px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); animation: result-enter 250ms cubic-bezier(.16,1,.3,1); }
+.game-result.result-win { background: var(--green-subtle); border-color: oklch(.46 .055 125); }
+.result-heading { display: flex; align-items: center; gap: 14px; }
+.result-heading h2 { font-size: 21px; font-weight: 650; letter-spacing: -.03em; }
+.result-heading p { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.result-icon { width: 48px; height: 48px; position: relative; flex-shrink: 0; display: grid; place-items: center; color: var(--green); }
+.result-loss .result-icon { color: var(--muted); }
+.fallen-king { width: 39px; height: 39px; transform-origin: 50% 90%; transform: rotate(-66deg); animation: king-concedes 700ms cubic-bezier(.22,1,.36,1); }
+.king-rest { position: absolute; width: 35px; height: 2px; bottom: 5px; left: 0; border-radius: 50%; background: var(--line); }
+.result-rematch-note { margin-top: 14px; font-size: 12px; color: var(--muted); line-height: 1.75; }
+.result-actions { display: flex; gap: 10px; margin-top: 16px; }
+.result-actions button { justify-content: center; flex: 1; min-height: 40px; padding: 10px 12px; font-size: 12px; }
+@keyframes result-enter { from { transform: translateY(6px); } to { transform: translateY(0); } }
+@keyframes king-concedes { from { transform: rotate(0); } to { transform: rotate(-66deg); } }
+@media (max-width: 580px) { .game-result { margin-left: 0; padding: 17px; }.result-heading h2 { font-size: 20px; }.result-actions { gap: 8px; }.result-actions button { padding: 10px 8px; font-size: 11px; } }
+@media (prefers-reduced-motion: reduce) { .board-confetti { display: none; }.game-result, .fallen-king { animation: none !important; } }
 .online-panel { padding: 0 22px 18px; }
 .online-panel .panel-intro { padding: 0; margin-bottom: 20px; }
 .online-field { display: block; font-size: 12px; color: var(--text); }

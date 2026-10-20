@@ -16,5 +16,7 @@ export interface OnlineRoom {
   serverNow: number;
   drawOffer: Color | null;
   outcome: string | null;
+  rematchOffer: Color | null;
+  round: number;
 }
-export type OnlineAction = 'resign' | 'cancel' | 'offer-draw' | 'accept-draw' | 'decline-draw';
+export type OnlineAction = 'resign' | 'cancel' | 'offer-draw' | 'accept-draw' | 'decline-draw' | 'request-rematch' | 'accept-rematch' | 'decline-rematch';

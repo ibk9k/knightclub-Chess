@@ -68,8 +68,8 @@ async (page) => {
     assert(await page.getByRole('tab', { name: 'Analysis FREE' }).isEnabled(), 'Analysis unlocks after the shared game ends');
     assert(await page.evaluate(() => JSON.parse(localStorage.getItem('knight-club-games') || '[]').some(game => game.result === 'Draw by agreement')), 'Completed online games are saved for review');
     await page.screenshot({ path: 'output/playwright/online-game-desktop.png', fullPage: true });
-    await page.getByRole('button', { name: 'Play another online game', exact: true }).click();
-    await guest.getByRole('button', { name: 'Play another online game', exact: true }).click();
+    await page.getByRole('button', { name: 'Leave room', exact: true }).click();
+    await guest.getByRole('button', { name: 'Leave room', exact: true }).click();
     await page.getByRole('button', { name: 'Find a random opponent', exact: true }).click();
     await page.locator('.online-room-status.waiting').waitFor();
     assert(await page.getByRole('textbox', { name: 'Invite link', exact: true }).isVisible(), 'Random matchmaking also offers an invite link while waiting');
@@ -81,7 +81,7 @@ async (page) => {
     await guest.getByRole('button', { name: 'Resign game', exact: true }).last().click();
     await page.locator('.online-result').filter({ hasText: 'wins by resignation' }).waitFor();
     assert(true, 'Leaving an active room awards the result to the opponent');
-    await page.getByRole('button', { name: 'Play another online game', exact: true }).click();
+    await page.getByRole('button', { name: 'Leave room', exact: true }).click();
     await page.getByRole('button', { name: 'Create private room', exact: true }).click();
     await page.locator('.online-room-status.waiting').waitFor();
     await page.getByRole('button', { name: 'Cancel room', exact: true }).click();

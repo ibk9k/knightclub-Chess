@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { Chess } from 'chess.js';
 import { handleOnlineRequest } from '../server/multiplayer';
 import type { RoomDatabase } from '../server/multiplayer';
@@ -10,7 +10,8 @@ import { materialAdvantage } from '../src/chess-utils';
 
 function fixture() {
   const sql = new DatabaseSync(':memory:');
-  sql.exec(readFileSync(new URL('../drizzle/0000_glorious_edwin_jarvis.sql', import.meta.url), 'utf8'));
+  const migrations = new URL('../drizzle/', import.meta.url);
+  for (const file of readdirSync(migrations).filter(file => file.endsWith('.sql')).sort()) sql.exec(readFileSync(new URL(file, migrations), 'utf8'));
   const db: RoomDatabase = {
     prepare(query) {
       let values: (string | number | null)[] = [];
@@ -143,6 +144,45 @@ test('cross-site writes are refused and seat cookies are private', async () => {
   assert.equal(blocked.status, 403);
   const created = await handleOnlineRequest(new Request('https://chess.test/api/online/rooms', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), db);
   assert.match(created.headers.get('set-cookie')!, /HttpOnly; SameSite=Lax;.*Secure/);
+});
+
+test('rematches require both original players, keep the room and clock, and swap colors', async () => {
+  const { player } = fixture(), white = player('Alice'), black = player('Bob'), stranger = player('Visitor');
+  let room = await white.create('rooms', 5);
+  room = await black.request(`rooms/${room.code}/join`, { name: 'Bob' });
+  await white.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: room.version }, 409);
+  room = await black.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  const code = room.code;
+  room = await white.request(`rooms/${code}/action`, { action: 'request-rematch', version: room.version });
+  assert.equal(room.status, 'finished', 'A request alone cannot reset the game');
+  assert.equal(room.rematchOffer, 'w');
+  await white.request(`rooms/${code}/action`, { action: 'accept-rematch', version: room.version }, 409);
+  await stranger.request(`rooms/${code}/action`, { action: 'accept-rematch', version: room.version }, 403);
+  room = await black.request(`rooms/${code}/action`, { action: 'accept-rematch', version: room.version });
+  assert.equal(room.status, 'active'); assert.equal(room.code, code); assert.equal(room.round, 2);
+  assert.equal(room.seat, 'w'); assert.deepEqual(room.players, { w: 'Bob', b: 'Alice' });
+  assert.equal(room.fen, new Chess().fen()); assert.deepEqual(room.moves, []);
+  assert.deepEqual(room.clocks, { w: 300000, b: 300000 }); assert.equal(room.clockRunning, false);
+  assert.equal(room.outcome, null); assert.equal(room.rematchOffer, null);
+  const alice = await white.request(`rooms/${code}`); assert.equal(alice.seat, 'b');
+  await white.request(`rooms/${code}/move`, { move: 'e2e4', version: room.version }, 409);
+  room = await black.request(`rooms/${code}/move`, { move: 'e2e4', version: room.version });
+  assert.deepEqual(room.moves, ['e2e4']);
+});
+
+test('rematches can be declined, and mutual requests start only one new round', async () => {
+  const { player } = fixture(), a = player('A'), b = player('B');
+  let room = await a.create(); room = await b.request(`rooms/${room.code}/join`, {});
+  room = await a.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  room = await b.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: room.version });
+  room = await a.request(`rooms/${room.code}/action`, { action: 'decline-rematch', version: room.version });
+  assert.equal(room.status, 'finished'); assert.equal(room.rematchOffer, null);
+  const finishedVersion = room.version;
+  room = await a.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: finishedVersion });
+  room = await b.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: finishedVersion });
+  assert.equal(room.round, 2); assert.equal(room.status, 'active');
+  await a.request(`rooms/${room.code}/action`, { action: 'accept-rematch', version: room.version }, 409);
+  assert.equal((await b.request(`rooms/${room.code}`)).round, 2);
 });
 
 test('material counts captures, trades, promotions, and the displayed historical position', () => {

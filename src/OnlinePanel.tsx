@@ -48,7 +48,8 @@ export function OnlinePanel({ online, notify, onLeave }: { online: OnlineGame; n
         <button className="secondary-button full-width" disabled={pending || !!room.drawOffer} onClick={() => void online.action('offer-draw')}>Offer a draw</button>
       </>}
       {room.outcome && <p className="online-result" role="status">{room.outcome}</p>}
-      <button className="text-button online-leave" disabled={pending} onClick={onLeave}>{room.status === 'waiting' ? <X size={15} /> : <Users size={15} />}{room.status === 'waiting' ? 'Cancel room' : room.status === 'active' ? 'Leave game' : 'Play another online game'}</button>
+      {room.status === 'finished' && <p className="online-description">Use Play again below the board to rematch this opponent. You’ll keep this room and switch colors.</p>}
+      <button className="text-button online-leave" disabled={pending} onClick={onLeave}>{room.status === 'waiting' ? <X size={15} /> : <Users size={15} />}{room.status === 'waiting' ? 'Cancel room' : room.status === 'active' ? 'Leave game' : 'Leave room'}</button>
     </>}
     {connection === 'reconnecting' && room && <p className="online-reconnect" role="status"><LoaderCircle size={14} className="spin" />Connection lost. Reconnecting…</p>}
     {error && connection !== 'reconnecting' && <p className="input-error online-error" role="alert">{error}</p>}

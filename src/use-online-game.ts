@@ -64,7 +64,7 @@ export function useOnlineGame() {
   }, [accept]);
 
   useEffect(() => {
-    if (!room || !['waiting', 'active'].includes(room.status)) return;
+    if (!room || !['waiting', 'active', 'finished'].includes(room.status)) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout>;
     const code = room.code, token = epoch.current;
     const poll = async () => {
@@ -76,7 +76,7 @@ export function useOnlineGame() {
           setConnection('reconnecting');
           setError(err instanceof Error ? err.message : 'Connection lost. Reconnecting…');
         }
-      } finally { if (!cancelled) timer = setTimeout(poll, document.hidden ? 5000 : 1100); }
+      } finally { if (!cancelled) timer = setTimeout(poll, document.hidden ? 5000 : room.status === 'finished' ? 1800 : 1100); }
     };
     timer = setTimeout(poll, 1000);
     const onVisible = () => { if (!document.hidden) { clearTimeout(timer); timer = setTimeout(poll, 0); } };

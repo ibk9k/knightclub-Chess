@@ -9,6 +9,7 @@ import { BOTS, QUALITY_SYMBOL, START_FEN, classifyMove, clockText, evalText, exp
 import type { Bot, Evaluation, MoveRecord, Quality } from './chess-utils';
 import { useOnlineGame } from './use-online-game';
 import { OnlinePanel } from './OnlinePanel';
+import { BoardConfetti, GameResult, presentResult } from './GameResult';
 
 type Mode = 'bot' | 'local' | 'analysis' | 'online';
 type DialogType = 'new' | 'import' | 'settings' | 'help' | 'resign' | 'games' | null;
@@ -74,7 +75,8 @@ function App() {
   const [engineRetry, setEngineRetry] = useState(0);
   const gameStarted = records.length > 0;
   const online = useOnlineGame();
-  const syncedOnline = useRef({ code: '', version: -1 });
+  const syncedOnline = useRef({ code: '', version: -1, round: 0 });
+  const localGameId = useRef(crypto.randomUUID());
   const onlineInProgress = mode === 'online' && online.room?.status === 'active';
 
   useEffect(() => {
@@ -85,6 +87,10 @@ function App() {
   useEffect(() => {
     const room = online.room;
     if (!room || (syncedOnline.current.code === room.code && syncedOnline.current.version === room.version)) return;
+    const newRoom = syncedOnline.current.code !== room.code || syncedOnline.current.round !== room.round;
+    if (!newRoom && game.current.fen() === room.fen && outcomeRef.current === room.outcome) {
+      syncedOnline.current = { code: room.code, version: room.version, round: room.round }; return;
+    }
     const chess = new Chess();
     const nextRecords: MoveRecord[] = [];
     for (const text of room.moves) {
@@ -92,9 +98,8 @@ function App() {
       if (!move) return;
       nextRecords.push({ san: move.san, uci: text, before: move.before, after: move.after, color: move.color });
     }
-    const newRoom = syncedOnline.current.code !== room.code;
     if (nextRecords.length > recordsRef.current.length && !newRoom) playSound(!!chess.history({ verbose: true }).at(-1)?.captured);
-    syncedOnline.current = { code: room.code, version: room.version };
+    syncedOnline.current = { code: room.code, version: room.version, round: room.round };
     generation.current++; game.current = chess; setMode('online'); setInitialFen(START_FEN);
     setFen(chess.fen()); setRecords(nextRecords); setSide(room.seat); setOutcome(room.outcome); outcomeRef.current = room.outcome;
     setActiveTimeControl(room.timeControl); setSelected(null); setPromotion(null); setHint(null); setBusy(false); setReviewing(false);
@@ -277,18 +282,21 @@ function App() {
     else setSelected(null);
   };
 
-  const beginGame = async (newMode: Mode = mode) => {
+  const beginGame = async (newMode: Mode = mode, sameOpponent = false) => {
     if (online.room && ['active', 'waiting'].includes(online.room.status)) {
       if (online.room.status === 'active') { setDialog('resign'); return; }
       if (!await online.action('cancel')) return;
     }
-    online.forget(); syncedOnline.current = { code: '', version: -1 };
+    online.forget(); syncedOnline.current = { code: '', version: -1, round: 0 }; localGameId.current = crypto.randomUUID();
     const token = ++generation.current;
-    const playerSide = chosenSide === 'random' ? Math.random() < 0.5 ? 'w' : 'b' : chosenSide;
-    game.current = new Chess(); setInitialFen(START_FEN); setFen(START_FEN); setRecords([]); setMode(newMode); setSide(playerSide); setFlipped(playerSide === 'b'); setBot(selectedBot); setSelected(null); setReviewIndex(null); setOutcome(null); outcomeRef.current = null; setHint(null); setDialog(null); setPendingMode(null); setBusy(false); setReviewing(false); setTab(newMode === 'local' || newMode === 'online' ? 'game' : 'analysis'); setActiveTimeControl(newMode === 'analysis' ? 0 : timeControl); setClocks({ w: timeControl * 60000, b: timeControl * 60000 }); savedId.current = null;
+    const playerSide = sameOpponent ? side : chosenSide === 'random' ? Math.random() < 0.5 ? 'w' : 'b' : chosenSide;
+    const nextBot = sameOpponent ? bot : selectedBot;
+    const minutes = sameOpponent ? activeTimeControl : timeControl;
+    game.current = new Chess(); setInitialFen(START_FEN); setFen(START_FEN); setRecords([]); setMode(newMode); setSide(playerSide); setFlipped(playerSide === 'b'); setBot(nextBot); setSelected(null); setReviewIndex(null); setOutcome(null); outcomeRef.current = null; setHint(null); setDialog(null); setPendingMode(null); setBusy(false); setReviewing(false); setTab(newMode === 'local' || newMode === 'online' ? 'game' : 'analysis'); setActiveTimeControl(newMode === 'analysis' ? 0 : minutes); setClocks({ w: minutes * 60000, b: minutes * 60000 }); savedId.current = null;
+    if (sameOpponent) { setSelectedBot(nextBot); setTimeControl(minutes); }
     if (newMode === 'bot' && playerSide === 'b' && engineStatus === 'ready') {
       setBusy(true);
-      try { await computerMove(token, selectedBot); } catch (error) { if (token === generation.current) handleEngineError(error); }
+      try { await computerMove(token, nextBot); } catch (error) { if (token === generation.current) handleEngineError(error); }
       finally { if (token === generation.current) setBusy(false); }
     }
   };
@@ -312,9 +320,9 @@ function App() {
 
   const reviewGame = async () => {
     if (!records.length || busy || reviewing || engineStatus !== 'ready' || onlineInProgress) return;
-    if (mode === 'online') { online.forget(); syncedOnline.current = { code: '', version: -1 }; }
     generation.current++; const token = generation.current;
-    setMode('analysis'); setTab('analysis'); setReviewing(true); setReviewProgress(0); setReviewIndex(null);
+    if (mode !== 'online') setMode('analysis');
+    setTab('analysis'); setReviewing(true); setReviewProgress(0); setReviewIndex(null);
     try { for (let i = 0; i < records.length; i++) { await analyzeRecord(records[i], token); if (token !== generation.current) return; setReviewProgress(Math.round((i + 1) / records.length * 100)); } notify('Review complete. Select any move to explore it.'); }
     catch (error) { handleEngineError(error); }
     finally { if (token === generation.current) setReviewing(false); }
@@ -326,7 +334,7 @@ function App() {
   const leaveOnline = async () => {
     if (online.room?.status === 'active') { setDialog('resign'); return; }
     if (online.room?.status === 'waiting' && !await online.action('cancel')) return;
-    online.forget(); syncedOnline.current = { code: '', version: -1 };
+    online.forget(); syncedOnline.current = { code: '', version: -1, round: 0 };
     generation.current++; game.current = new Chess(); setFen(START_FEN); setInitialFen(START_FEN); setRecords([]);
     setOutcome(null); outcomeRef.current = null; setSelected(null); setHint(null); setReviewIndex(null);
     setFlipped(false); setSide('w'); setTab('game'); setActiveTimeControl(0); setClocks({ w: 0, b: 0 }); savedId.current = null;
@@ -337,11 +345,17 @@ function App() {
     generation.current++; setBusy(false); setOutcome(`${mode === 'bot' ? side === 'w' ? 'Black' : 'White' : game.current.turn() === 'w' ? 'Black' : 'White'} wins by resignation`); setDialog(null);
   };
 
+  const playAgain = () => {
+    if (mode === 'online') { void online.action(online.room?.rematchOffer && online.room.rematchOffer !== side ? 'accept-rematch' : 'request-rematch'); return; }
+    void beginGame(mode, true);
+  };
+
   function buildPgn() {
     const c = new Chess(initialFen);
     for (const record of recordsRef.current) makeUci(c, record.uci);
     c.setHeader('Event', 'Knight Club practice'); c.setHeader('Site', 'Knight Club'); c.setHeader('Date', new Date().toISOString().slice(0, 10).replaceAll('-', '.'));
     c.setHeader('White', mode === 'online' ? online.room?.players.w || 'White' : mode === 'bot' && side === 'b' ? bot.name : 'You'); c.setHeader('Black', mode === 'online' ? online.room?.players.b || 'Black' : mode === 'bot' && side === 'w' ? bot.name : 'Player 2');
+    if (mode === 'online' && online.room) c.setHeader('Round', String(online.room.round));
     if (outcomeRef.current) c.setHeader('Result', outcomeRef.current.startsWith('White') ? '1-0' : outcomeRef.current.startsWith('Black') ? '0-1' : '1/2-1/2');
     return c.pgn();
   }
@@ -388,6 +402,9 @@ function App() {
   const topColor: Color = flipped ? 'w' : 'b';
   const bottomColor: Color = flipped ? 'b' : 'w';
   const isBot = (color: Color) => mode === 'bot' && color !== side;
+  const result = mode !== 'analysis' ? presentResult(outcome, mode === 'local' ? null : side) : null;
+  const resultGameId = mode === 'online' && online.room ? `${online.room.code}:${online.room.round}` : localGameId.current;
+  const rematch = mode !== 'online' || !online.room?.rematchOffer ? 'none' : online.room.rematchOffer === side ? 'sent' : 'received';
   const capturePieces = (color: Color) => {
     return records.slice(0, reviewIndex ?? records.length).filter(record => record.color === color).flatMap(record => {
       const move = makeUci(new Chess(record.before), record.uci);
@@ -466,12 +483,13 @@ function App() {
                     {shownRecord?.quality && square === shownLast?.slice(2, 4) && tab === 'analysis' && <span className={`board-quality quality-${shownRecord.quality.toLowerCase()}`}>{QUALITY_SYMBOL[shownRecord.quality]}</span>}
                   </button>;
                 })}
+                {result?.kind === 'win' && reviewIndex === null && <BoardConfetti key={resultGameId} gameId={resultGameId} />}
                 {promotion && <div className="promotion-backdrop"><div className="promotion-picker" role="dialog" aria-label="Choose a promotion piece"><span>Promote your pawn</span><div>{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(p => <button key={p} aria-label={`Promote to ${pieceNames[p]}`} onClick={() => void commitMove(promotion.from, promotion.to, p)}><img src={`/pieces/${game.current.turn()}${p.toUpperCase()}.svg`} alt={pieceNames[p]} /></button>)}</div><button className="text-button" onClick={() => setPromotion(null)}>Cancel</button></div></div>}
               </div>
             </div>
             {renderPlayer(bottomColor)}
             <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || mode === 'online'} onClick={takeback}><RotateCcw size={17} /><span>Take back</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || mode === 'online'} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
-            {mode === 'online' && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
+            {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : mode === 'online' && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
           </section>
 
           <aside className="companion-column" aria-label="Game controls and analysis">
