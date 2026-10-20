@@ -10,6 +10,8 @@ import type { Bot, Evaluation, MoveRecord, Quality } from './chess-utils';
 import { useOnlineGame } from './use-online-game';
 import { OnlinePanel } from './OnlinePanel';
 import { BoardConfetti, GameResult, presentResult } from './GameResult';
+import { explainIllegalMove, isCastleAttempt } from './move-rules';
+import { MoveRuleNotice } from './MoveRuleNotice';
 
 type Mode = 'bot' | 'local' | 'analysis' | 'online';
 type DialogType = 'new' | 'import' | 'settings' | 'help' | 'resign' | 'games' | null;
@@ -45,6 +47,7 @@ function App() {
   const [reviewing, setReviewing] = useState(false);
   const [reviewProgress, setReviewProgress] = useState(0);
   const [hint, setHint] = useState<string | null>(null);
+  const [moveRule, setMoveRule] = useState<{ message: string; from: Square; to?: Square } | null>(null);
   const [toast, setToast] = useState('');
   const [outcome, setOutcome] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogType>(null);
@@ -130,6 +133,7 @@ function App() {
 
   const notify = useCallback((message: string) => setToast(message), []);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 4000); return () => clearTimeout(timer); }, [toast]);
+  useEffect(() => { setMoveRule(null); }, [fen, mode, reviewIndex, outcome]);
 
   useEffect(() => {
     const current = new StockfishEngine();
@@ -255,19 +259,24 @@ function App() {
     void computerMove(token, bot).catch(error => { if (token === generation.current) handleEngineError(error); }).finally(() => { if (token === generation.current) setBusy(false); });
   }, [engineStatus, mode, busy, reviewing, outcome, fen, side]);
 
+  const explainAttempt = (from: Square, to: Square) => {
+    const message = explainIllegalMove(game.current, from, to);
+    if (message) setMoveRule({ message, from, to: from === to ? undefined : to });
+  };
+
   const commitMove = async (from: Square, to: Square, piece: PieceSymbol = 'q') => {
     if (busy || reviewing || reviewIndex !== null || outcome || (mode === 'bot' && game.current.turn() !== side)) return;
     if (mode === 'online') {
       if (online.pending || online.connection !== 'connected' || online.room?.status !== 'active' || game.current.turn() !== side) return;
       const possible = game.current.moves({ square: from, verbose: true }).find(move => move.to === to && (!move.promotion || move.promotion === piece));
-      if (!possible) { notify('That move isn’t legal. Try a highlighted square.'); return; }
-      setPromotion(null); setSelected(null); await online.move(uci(possible)); return;
+      if (!possible) { explainAttempt(from, to); return; }
+      setMoveRule(null); setPromotion(null); setSelected(null); await online.move(uci(possible)); return;
     }
     const before = game.current.fen();
     let move;
-    try { move = game.current.move({ from, to, promotion: piece }); } catch { notify('That move isn’t legal. Try a highlighted square.'); return; }
+    try { move = game.current.move({ from, to, promotion: piece }); } catch { explainAttempt(from, to); return; }
     const record: MoveRecord = { san: move.san, uci: uci(move), before, after: game.current.fen(), color: move.color };
-    setSelected(null); setHint(null); setPromotion(null); setRecords(prev => [...prev, record]); setFen(record.after); playSound(move.isCapture());
+    setMoveRule(null); setSelected(null); setHint(null); setPromotion(null); setRecords(prev => [...prev, record]); setFen(record.after); playSound(move.isCapture());
     const end = gameOutcome(game.current); if (end) setOutcome(end);
     if (engineStatus !== 'ready') return;
     const token = generation.current; setBusy(true);
@@ -280,8 +289,11 @@ function App() {
   };
 
   const tryMove = (from: Square, to: Square) => {
+    if (!isPlayable) { explainUnavailable(from); return; }
+    if (from === to) { setSelected(null); setMoveRule(null); return; }
     const possible = game.current.moves({ square: from, verbose: true }).filter(m => m.to === to);
-    if (!possible.length) { setSelected(null); return; }
+    if (!possible.length) { explainAttempt(from, to); return; }
+    setMoveRule(null);
     if (possible.some(m => m.promotion)) setPromotion({ from, to });
     else void commitMove(from, to);
   };
@@ -298,12 +310,30 @@ function App() {
   const onlineHintUnavailable = mode === 'online' && (!onlineCheats || !onlineInProgress || position.turn() !== side || reviewIndex !== null || online.pending || online.connection !== 'connected');
   const onlineTakebackAvailable = onlineCheats && onlineInProgress && records.some(record => record.color === side) && !online.pending && online.connection === 'connected';
 
+  const explainUnavailable = (square: Square) => {
+    if (outcome && mode !== 'analysis') return;
+    const message = outcome ? 'This game has ended. Start a new game or open the analysis board to explore moves.'
+      : reviewIndex !== null ? 'You’re viewing an earlier position. Select Live or Latest position to return to the game before moving.'
+      : reviewing ? 'The game review is running. Wait for it to finish before moving.'
+      : mode === 'online' && !online.room ? 'Create a room or join an invite before making an online move.'
+      : mode === 'online' && online.room?.status === 'waiting' ? 'Wait for your opponent to join before moving.'
+      : mode === 'online' && online.connection !== 'connected' ? 'The game is reconnecting. Wait for the connection to return before moving.'
+      : mode === 'online' && online.pending ? 'Your last action is still being confirmed. Wait a moment before making another move.'
+      : (mode === 'bot' || mode === 'online') && position.turn() !== side ? 'It’s your opponent’s turn. Wait for their move.'
+      : engineStatus !== 'ready' && mode === 'bot' ? 'The chess engine is loading or needs a retry. Wait until it’s ready before moving.'
+      : 'Your last move is being analyzed. Wait a moment before moving again.';
+    setMoveRule({ message, from: square });
+  };
+
   const onSquare = (square: Square) => {
-    if (!isPlayable) return;
-    if (selected && legalMoves.some(m => m.to === square)) { tryMove(selected, square); return; }
+    if (!isPlayable) { explainUnavailable(square); return; }
     const piece = position.get(square);
-    if (piece && piece.color === position.turn()) setSelected(selected === square ? null : square);
-    else setSelected(null);
+    // Clicking another friendly piece normally changes selection. A two-square
+    // king move is an attempted castle, even if a friendly piece blocks it.
+    if (selected && selected !== square && (!piece || piece.color !== position.turn() || isCastleAttempt(position, selected, square))) { tryMove(selected, square); return; }
+    if (piece && piece.color === position.turn()) { setMoveRule(null); setSelected(selected === square ? null : square); }
+    else if (piece) explainAttempt(square, square);
+    else { setSelected(null); setMoveRule(null); }
   };
 
   const beginGame = async (newMode: Mode = mode, sameOpponent = false) => {
@@ -413,7 +443,7 @@ function App() {
       if (dialog || promotion || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
       if (event.key === 'ArrowLeft') { event.preventDefault(); navigateReview(Math.max(0, (reviewIndex ?? records.length) - 1)); }
       if (event.key === 'ArrowRight') { event.preventDefault(); const next = (reviewIndex ?? records.length) + 1; navigateReview(next >= records.length ? null : next); }
-      if (event.key === 'Escape') { setSelected(null); setHint(null); }
+      if (event.key === 'Escape') { setSelected(null); setHint(null); setMoveRule(null); }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   }, [dialog, promotion, reviewIndex, records.length, navigateReview]);
@@ -503,9 +533,9 @@ function App() {
                     event.dataTransfer.setDragImage(image, image.width / 2, image.height / 2);
                     event.dataTransfer.setData('text/plain', square);
                     event.dataTransfer.effectAllowed = 'move';
-                    setSelected(square);
+                    setMoveRule(null); setSelected(square);
                   };
-                  return <button key={square} type="button" className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastMove ? 'last-move' : ''} ${isHint ? 'hint-square' : ''} ${inCheck ? 'check-square' : ''}`} aria-label={`${square}${piece ? ` ${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}` : ''}${legal ? ' legal destination' : ''}`} aria-pressed={selected === square} onClick={() => onSquare(square)} draggable={!!piece && isPlayable && piece.color === position.turn()} onDragStart={onDragStart} onDragOver={event => { if (isPlayable) event.preventDefault(); }} onDrop={event => { event.preventDefault(); const source = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(source)) tryMove(source as Square, square); }}>
+                  return <button key={square} type="button" className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastMove ? 'last-move' : ''} ${isHint ? 'hint-square' : ''} ${inCheck ? 'check-square' : ''} ${moveRule?.to === square ? 'invalid-square' : ''}`} aria-label={`${square}${piece ? ` ${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}` : ''}${legal ? ' legal destination' : ''}`} aria-describedby={moveRule && (moveRule.from === square || moveRule.to === square) ? 'move-rule-explanation' : undefined} aria-pressed={selected === square} onClick={() => onSquare(square)} draggable={!!piece && isPlayable && piece.color === position.turn()} onDragStart={onDragStart} onDragOver={event => { if (isPlayable) event.preventDefault(); }} onDrop={event => { event.preventDefault(); const source = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(source)) tryMove(source as Square, square); }}>
                     {col === 0 && <span className="coordinate rank">{rank}</span>}{row === 7 && <span className="coordinate file">{'abcdefgh'[file]}</span>}
                     {piece && <img className="piece" src={`/pieces/${piece.color}${piece.type.toUpperCase()}.svg`} alt="" draggable={false} />}
                     {showLegal && legal && <span className={piece ? 'legal-capture' : 'legal-dot'} />}
@@ -518,7 +548,7 @@ function App() {
             </div>
             {renderPlayer(bottomColor)}
             <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || (mode === 'online' && !onlineTakebackAvailable)} title={onlineCheats ? 'Undo your last move and any reply on both boards' : undefined} onClick={takeback}><RotateCcw size={17} /><span>Take back</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || onlineHintUnavailable} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
-            {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
+            {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : moveRule ? <MoveRuleNotice {...moveRule} onDismiss={() => setMoveRule(null)} /> : mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
           </section>
 
           <aside className="companion-column" aria-label="Game controls and analysis">
@@ -557,7 +587,7 @@ function App() {
       {dialog === 'import' && <><div className="dialog-symbol"><Upload size={28} /></div><h2>Bring a game to the club.</h2><p>Paste a PGN game or a FEN position. Then let Stockfish help you find the ideas you missed.</p><label className="import-label" htmlFor="game-import">PGN or FEN</label><textarea id="game-import" value={input} onChange={e => setInput(e.target.value)} placeholder={'1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5'} rows={6} autoFocus />{inputError && <p className="input-error" role="alert">{inputError}</p>}<div className="dialog-actions"><label className="secondary-button file-label"><Upload size={16} />Open PGN file<input type="file" accept=".pgn,.txt" onChange={async e => { const file = e.target.files?.[0]; if (file) setInput(await file.text()); }} /></label><button className="primary-button" onClick={() => loadPosition(input)}>Analyze game <ArrowRight size={16} /></button></div></>}
       {dialog === 'settings' && <><div className="dialog-symbol"><Settings2 size={28} /></div><h2>Make it your board.</h2><p>A few small touches for the way you like to play.</p><div className="setting-row"><div><strong>Move sounds</strong><span>A little feedback with every move.</span></div><button role="switch" aria-checked={sound} aria-label="Move sounds" className={`toggle ${sound ? 'on' : ''}`} onClick={() => setSound(v => !v)}><span /></button></div><div className="setting-row"><div><strong>Legal move hints</strong><span>Show where a selected piece can go.</span></div><button role="switch" aria-checked={showLegal} aria-label="Legal move hints" className={`toggle ${showLegal ? 'on' : ''}`} onClick={() => setShowLegal(v => !v)}><span /></button></div><div className="setting-row"><div><strong>Personal coach</strong><span>Get feedback below the board.</span></div><button role="switch" aria-checked={coach} aria-label="Personal coach" className={`toggle ${coach ? 'on' : ''}`} onClick={() => setCoach(v => !v)}><span /></button></div><div className="setting-theme"><strong>Board palette</strong><div>{[{ id: 'club', name: 'Club green' }, { id: 'slate', name: 'Blue slate' }, { id: 'walnut', name: 'Walnut' }].map(t => <button key={t.id} className={`theme-swatch swatch-${t.id} ${boardTheme === t.id ? 'selected' : ''}`} aria-pressed={boardTheme === t.id} onClick={() => setBoardTheme(t.id)}><span><i /><i /><i /><i /></span>{t.name}</button>)}</div></div><button className="primary-button full-width" onClick={() => setDialog(null)}>Looks good <Check size={17} /></button></>}
       {dialog === 'games' && <><div className="dialog-symbol"><History size={28} /></div><h2>Your time at the board.</h2><p>Completed games are saved in this browser. Export a PGN to keep a copy anywhere.</p>{!savedGames.length ? <div className="saved-empty"><Trophy size={35} /><strong>Your first story is still being written.</strong><span>Finish a game to find it here.</span></div> : <div className="saved-games">{savedGames.map(saved => <button key={saved.id} onClick={() => loadPosition(saved.pgn)}><div><strong>You vs. {saved.bot}</strong><span>{saved.result} · {Math.ceil(saved.moves / 2)} moves</span></div><span>{new Date(saved.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}<ChevronRight size={17} /></span></button>)}</div>}<button className="primary-button full-width" onClick={() => setDialog(null)}><ArrowLeft size={16} />Back to the board</button></>}
-      {dialog === 'help' && <><div className="dialog-symbol"><KnightMark /></div><h2>Welcome to Knight Club.</h2><p>Your place to play, explore, and get a little better. No account or subscription needed.</p><div className="help-items"><div><Target size={21} /><div><strong>Make your move</strong><p>Click a piece, then a highlighted square. You can also drag pieces. Castle by moving your king two squares; choose a piece when a pawn promotes.</p></div></div><div><Gamepad2 size={21} /><div><strong>Find your challenge</strong><p>Play online to create a private invite, join with a code, or find a random opponent. Choose a bot, your color, and a time control, then start a new game. Bot ratings indicate relative difficulty and are approximate.</p></div></div><div><BarChart3 size={21} /><div><strong>Understand the why</strong><p>Stockfish evaluates every move. Best, Excellent, Good, Inaccuracy, Mistake, and Blunder are based on evaluation loss. Accuracy and explanations are estimates, not Chess.com’s proprietary system.</p></div></div><div><BookOpen size={21} /><div><strong>Explore your game</strong><p>Select a move or use the arrow keys to go back. The analysis board accepts PGN and FEN. Review a whole game, or try a different continuation after taking moves back.</p></div></div></div><div className="credits">Engine: <a href="https://github.com/nmrugg/stockfish.js" target="_blank" rel="noreferrer">Stockfish.js 18 · GPL-3.0</a> · <a href="/engine/LICENSE.txt" target="_blank" rel="noreferrer">License</a><br />Pieces: <a href="https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces" target="_blank" rel="noreferrer">Colin M. L. Burnett · CC BY-SA 3.0</a><br />Rules: chess.js · Independent project, unaffiliated with Chess.com.</div><button className="primary-button full-width" onClick={() => setDialog(null)}>Let’s play <ArrowRight size={17} /></button></>}
+      {dialog === 'help' && <><div className="dialog-symbol"><KnightMark /></div><h2>Welcome to Knight Club.</h2><p>Your place to play, explore, and get a little better. No account or subscription needed.</p><div className="help-items"><div><Target size={21} /><div><strong>Make your move</strong><p>Click a piece, then a highlighted square. You can also drag pieces. Castle by moving your king two squares; choose a piece when a pawn promotes. Try an unavailable destination to see why the move isn’t allowed.</p></div></div><div><Gamepad2 size={21} /><div><strong>Find your challenge</strong><p>Play online to create a private invite, join with a code, or find a random opponent. Choose a bot, your color, and a time control, then start a new game. Bot ratings indicate relative difficulty and are approximate.</p></div></div><div><BarChart3 size={21} /><div><strong>Understand the why</strong><p>Stockfish evaluates every move. Best, Excellent, Good, Inaccuracy, Mistake, and Blunder are based on evaluation loss. Accuracy and explanations are estimates, not Chess.com’s proprietary system.</p></div></div><div><BookOpen size={21} /><div><strong>Explore your game</strong><p>Select a move or use the arrow keys to go back. The analysis board accepts PGN and FEN. Review a whole game, or try a different continuation after taking moves back.</p></div></div></div><div className="credits">Engine: <a href="https://github.com/nmrugg/stockfish.js" target="_blank" rel="noreferrer">Stockfish.js 18 · GPL-3.0</a> · <a href="/engine/LICENSE.txt" target="_blank" rel="noreferrer">License</a><br />Pieces: <a href="https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces" target="_blank" rel="noreferrer">Colin M. L. Burnett · CC BY-SA 3.0</a><br />Rules: chess.js · Independent project, unaffiliated with Chess.com.</div><button className="primary-button full-width" onClick={() => setDialog(null)}>Let’s play <ArrowRight size={17} /></button></>}
     </dialog>
     {toast && <div className="toast" role="status"><Check size={17} /><span>{toast}</span><button aria-label="Dismiss notification" onClick={() => setToast('')}><X size={15} /></button></div>}
   </div>;

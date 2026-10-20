@@ -31,6 +31,7 @@ Apply each migration once. Local preview and production use separate databases. 
 
 - Six bot opponents with Stockfish skill/depth limits and beginner mistake variation. Displayed bot ratings are approximate, not calibrated Elo.
 - Click or drag legal moves, castling, en passant, underpromotion, check, mate, and automatic draw detection.
+- Illegal clicks and drags show a plain-language explanation beside the board and mark the attempted destination. Help covers each piece’s movement, blocked paths, pawn captures, en passant, king safety, and individual castling restrictions. The piece stays selected for another try. Explanations work with keyboard controls and in standard online games without engine assistance; making a move, changing position, selecting another piece, dismissing the message, or pressing Escape clears them.
 - Color selection, six time controls including untimed play, local games, hints, takebacks, flipping, move sounds, and board palettes.
 - Bot games start with no clock. Timed play is an explicit choice.
 - Online private rooms with 8-character codes and invite links, plus random matchmaking by time control. A random lobby can also be shared directly with a friend.
@@ -55,6 +56,8 @@ Run `npm test` for rules integration, analysis polarity, special moves, outcome 
 Multiplayer tests use SQLite and separate authenticated player sessions to exercise private room access, racing match requests, illegal/stale moves, terminal results, server clocks, and material scoring. With a local preview running, `playwright-cli run-code --filename=tests/browser/multiplayer.js` checks the full two-browser invite, matchmaking, reconnection, material, and phone-layout flows. The browser check creates temporary games in the selected environment; run it against local preview.
 
 `tests/browser/online-latency.js` measures click-to-board latency with normal and delayed network requests, requiring local display within 100 ms. `tests/browser/online-move-recovery.js` exercises old heartbeats during a pending move, rejection and network failure rollback, committed moves with lost replies, conflicting versions, rematches, and confirmed-only results through the real two-player UI.
+
+`tests/move-rules.test.ts` checks targeted rule explanations and that inspecting an attempt never mutates the game. `tests/browser/move-rules.js` verifies actual clicks, native dragging, keyboard input, mobile layout, and both colors in a standard online room.
 
 Engine tests also verify in-progress UCI evaluation updates and cancellation when the displayed position changes. With the dev server running and a Playwright CLI browser open, run `playwright-cli run-code --filename=tests/browser/drag-live.js` to check the native piece-only drag preview and live bot-game analysis end to end.
 
