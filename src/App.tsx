@@ -78,6 +78,8 @@ function App() {
   const syncedOnline = useRef({ code: '', version: -1, round: 0 });
   const localGameId = useRef(crypto.randomUUID());
   const onlineInProgress = mode === 'online' && online.room?.status === 'active';
+  const onlineCheats = mode === 'online' && !!online.room?.cheatMode;
+  const onlineAnalysisAllowed = mode !== 'online' || onlineCheats || online.room?.status === 'finished';
 
   useEffect(() => {
     if (new URLSearchParams(location.search).has('join')) { setMode('online'); setTab('game'); }
@@ -88,7 +90,8 @@ function App() {
     const room = online.room;
     if (!room || (syncedOnline.current.code === room.code && syncedOnline.current.version === room.version)) return;
     const newRoom = syncedOnline.current.code !== room.code || syncedOnline.current.round !== room.round;
-    if (!newRoom && game.current.fen() === room.fen && outcomeRef.current === room.outcome) {
+    const sameMoves = room.moves.length === recordsRef.current.length && room.moves.every((move, index) => recordsRef.current[index].uci === move);
+    if (!newRoom && sameMoves && game.current.fen() === room.fen && outcomeRef.current === room.outcome) {
       syncedOnline.current = { code: room.code, version: room.version, round: room.round }; return;
     }
     const chess = new Chess();
@@ -96,14 +99,16 @@ function App() {
     for (const text of room.moves) {
       const move = makeUci(chess, text);
       if (!move) return;
-      nextRecords.push({ san: move.san, uci: text, before: move.before, after: move.after, color: move.color });
+      const previous = !newRoom ? recordsRef.current[nextRecords.length] : undefined;
+      nextRecords.push(previous?.uci === text && previous.before === move.before ? previous : { san: move.san, uci: text, before: move.before, after: move.after, color: move.color });
     }
     if (nextRecords.length > recordsRef.current.length && !newRoom) playSound(!!chess.history({ verbose: true }).at(-1)?.captured);
     syncedOnline.current = { code: room.code, version: room.version, round: room.round };
     generation.current++; game.current = chess; setMode('online'); setInitialFen(START_FEN);
     setFen(chess.fen()); setRecords(nextRecords); setSide(room.seat); setOutcome(room.outcome); outcomeRef.current = room.outcome;
     setActiveTimeControl(room.timeControl); setSelected(null); setPromotion(null); setHint(null); setBusy(false); setReviewing(false);
-    if (newRoom) { setFlipped(room.seat === 'b'); setReviewIndex(null); setTab('game'); savedId.current = null; }
+    if (nextRecords.length < recordsRef.current.length) setReviewIndex(null);
+    if (newRoom) { setFlipped(room.seat === 'b'); setReviewIndex(null); setTab(room.cheatMode ? 'analysis' : 'game'); savedId.current = null; }
   }, [online.room]);
 
   useEffect(() => {
@@ -208,6 +213,18 @@ function App() {
     return after;
   };
 
+  useEffect(() => {
+    if (!onlineCheats || engineStatus !== 'ready' || reviewing) return;
+    const record = records.find(record => !record.quality);
+    if (!record) return;
+    const token = generation.current;
+    let active = true;
+    // Grade shared moves without blocking either player's turn. The live bar
+    // uses its own worker, and generation checks discard stale takeback work.
+    void analyzeRecord(record, token).catch(error => { if (active && token === generation.current) handleEngineError(error); });
+    return () => { active = false; };
+  }, [records, onlineCheats, engineStatus, reviewing]);
+
   const computerMove = async (token: number, opponent: Bot) => {
     if (token !== generation.current || game.current.isGameOver() || outcomeRef.current) return;
     const before = game.current.fen();
@@ -269,10 +286,12 @@ function App() {
   const isPlayable = !busy && !reviewing && !outcome && reviewIndex === null && (mode !== 'bot' || (position.turn() === side && engineStatus === 'ready')) && (mode !== 'online' || (online.room?.status === 'active' && online.connection === 'connected' && !online.pending && position.turn() === side));
   const legalMoves = selected && isPlayable ? position.moves({ square: selected, verbose: true }) : [];
   const shownRecord = reviewIndex === null ? records.at(-1) : records[reviewIndex - 1];
-  const coachRecord = reviewIndex === null && mode === 'bot' ? [...records].reverse().find(r => r.color === side) : shownRecord;
-  const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !reviewing && engineStatus === 'ready' && (mode !== 'online' || online.room?.status === 'finished'));
+  const coachRecord = reviewIndex === null && (mode === 'bot' || onlineCheats) ? [...records].reverse().find(r => r.color === side) : shownRecord;
+  const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !reviewing && engineStatus === 'ready' && onlineAnalysisAllowed);
   const shownEval = liveAnalysis.evaluation || evaluations.current.get(boardFen) || shownRecord?.evaluation;
   const shownLast = shownRecord?.uci;
+  const onlineHintUnavailable = mode === 'online' && (!onlineCheats || !onlineInProgress || position.turn() !== side || reviewIndex !== null || online.pending || online.connection !== 'connected');
+  const onlineTakebackAvailable = onlineCheats && onlineInProgress && records.some(record => record.color === side) && !online.pending && online.connection === 'connected';
 
   const onSquare = (square: Square) => {
     if (!isPlayable) return;
@@ -302,7 +321,11 @@ function App() {
   };
 
   const takeback = () => {
-    if (!records.length || reviewing || mode === 'online') return;
+    if (!records.length || reviewing) return;
+    if (mode === 'online') {
+      if (!onlineTakebackAvailable) return;
+      setSelected(null); setHint(null); setReviewIndex(null); void online.action('takeback'); return;
+    }
     generation.current++; setBusy(false); setOutcome(null); outcomeRef.current = null; setSelected(null); setHint(null); setReviewIndex(null); savedId.current = null;
     let count = 1;
     if (mode === 'bot' && records.length >= 2 && game.current.turn() === side) count = 2;
@@ -311,7 +334,7 @@ function App() {
   };
 
   const requestHint = async () => {
-    if (busy || reviewing || outcome || engineStatus !== 'ready' || mode === 'online') return;
+    if (busy || reviewing || outcome || engineStatus !== 'ready' || onlineHintUnavailable) return;
     setBusy(true); const token = generation.current;
     try { const result = await evaluate(boardFen); if (token !== generation.current) return; setHint(result.bestMove); setSelected(result.bestMove.slice(0, 2) as Square); notify(`Try ${toSan(boardFen, result.bestMove)} — Stockfish’s top choice.`); }
     catch (error) { handleEngineError(error); }
@@ -319,7 +342,7 @@ function App() {
   };
 
   const reviewGame = async () => {
-    if (!records.length || busy || reviewing || engineStatus !== 'ready' || onlineInProgress) return;
+    if (!records.length || busy || reviewing || engineStatus !== 'ready' || onlineInProgress && !onlineCheats) return;
     generation.current++; const token = generation.current;
     if (mode !== 'online') setMode('analysis');
     setTab('analysis'); setReviewing(true); setReviewProgress(0); setReviewIndex(null);
@@ -328,7 +351,7 @@ function App() {
     finally { if (token === generation.current) setReviewing(false); }
   };
 
-  const enterAnalysis = () => { if (onlineInProgress) { notify('Analysis is available after your online game.'); return; } if (online.room?.status === 'waiting') { notify('Cancel your room before opening analysis.'); return; } online.forget(); generation.current++; setBusy(false); setReviewing(false); setMode('analysis'); setTab('analysis'); setMobileNav(false); setSelected(null); };
+  const enterAnalysis = () => { if (onlineCheats && online.room && ['waiting', 'active', 'finished'].includes(online.room.status)) { setTab('analysis'); setMobileNav(false); return; } if (onlineInProgress) { notify('Analysis is available after your online game.'); return; } if (online.room?.status === 'waiting') { notify('Cancel your room before opening analysis.'); return; } online.forget(); generation.current++; setBusy(false); setReviewing(false); setMode('analysis'); setTab('analysis'); setMobileNav(false); setSelected(null); };
   const switchPlayMode = (nextMode: Mode) => { setMobileNav(false); if (mode === nextMode) return; if (onlineInProgress) { setDialog('resign'); return; } if (records.length) { setPendingMode(nextMode); setDialog('new'); } else void beginGame(nextMode); };
 
   const leaveOnline = async () => {
@@ -356,6 +379,7 @@ function App() {
     c.setHeader('Event', 'Knight Club practice'); c.setHeader('Site', 'Knight Club'); c.setHeader('Date', new Date().toISOString().slice(0, 10).replaceAll('-', '.'));
     c.setHeader('White', mode === 'online' ? online.room?.players.w || 'White' : mode === 'bot' && side === 'b' ? bot.name : 'You'); c.setHeader('Black', mode === 'online' ? online.room?.players.b || 'Black' : mode === 'bot' && side === 'w' ? bot.name : 'Player 2');
     if (mode === 'online' && online.room) c.setHeader('Round', String(online.room.round));
+    if (mode === 'online' && online.room?.cheatMode) c.setHeader('Mode', 'Cheat mode - shared engine assistance');
     if (outcomeRef.current) c.setHeader('Result', outcomeRef.current.startsWith('White') ? '1-0' : outcomeRef.current.startsWith('Black') ? '0-1' : '1/2-1/2');
     return c.pgn();
   }
@@ -445,7 +469,7 @@ function App() {
     </aside>
 
     <main>
-      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={22} /></button><span>Play</span><ChevronRight size={14} /><strong>{mode === 'bot' ? 'Computer' : mode === 'local' ? 'Local game' : mode === 'online' ? 'Online game' : 'Analysis board'}</strong></div><div className="topbar-right"><span className={`engine-status ${engineStatus}`}><span />{mode === 'online' && online.room?.status !== 'finished' ? 'Online chess' : engineStatus === 'loading' ? 'Loading Stockfish' : engineStatus === 'error' ? 'Engine needs attention' : 'Stockfish ready'}</span><button className="help-button icon-button" aria-label="Help" onClick={() => setDialog('help')}><CircleHelp size={19} /></button><div className="top-avatar">Y</div></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={22} /></button><span>Play</span><ChevronRight size={14} /><strong>{mode === 'bot' ? 'Computer' : mode === 'local' ? 'Local game' : mode === 'online' ? 'Online game' : 'Analysis board'}</strong></div><div className="topbar-right"><span className={`engine-status ${engineStatus}`}><span />{mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? 'Online chess' : engineStatus === 'loading' ? 'Loading Stockfish' : engineStatus === 'error' ? 'Engine needs attention' : 'Stockfish ready'}</span><button className="help-button icon-button" aria-label="Help" onClick={() => setDialog('help')}><CircleHelp size={19} /></button><div className="top-avatar">Y</div></div></header>
       <div className="page-content">
         <div className="page-heading"><div><h1>{mode === 'analysis' ? 'Find the idea behind the move.' : 'Your next great move starts here.'}</h1><p>{mode === 'analysis' ? 'Explore any position. Understand every possibility.' : 'A worthy opponent. A fresh board. A little better with every game.'}</p></div><div className="practice-badge"><span /><span>No pressure.<br /><strong>Just practice.</strong></span></div></div>
         {engineStatus === 'error' && <div className="engine-error" role="alert"><Cpu size={20} /><span>{engineMessage}</span><button onClick={() => { setEngineRetry(n => n + 1); setBusy(false); }}>Retry engine</button></div>}
@@ -454,7 +478,7 @@ function App() {
           <section className="board-column" aria-label="Chess game">
             {renderPlayer(topColor)}
             <div className="board-wrap">
-              {(mode !== 'online' || online.room?.status === 'finished') && <div className="evaluation-bar" aria-label={`Evaluation ${evalText(shownEval)} from White’s perspective`}><div className="eval-black" /><div className="eval-white" style={{ height: `${whitePercent}%`, top: flipped ? 0 : 'auto', bottom: flipped ? 'auto' : 0 }} /><span className={`eval-number ${(shownEval?.cp || 0) > 0 ? 'positive' : ''}`} style={{ top: flipped ? 6 : 'auto', bottom: flipped ? 'auto' : 6 }}>{evalText(shownEval)}</span></div>}
+              {onlineAnalysisAllowed && <div className="evaluation-bar" aria-label={`Evaluation ${evalText(shownEval)} from White’s perspective`}><div className="eval-black" /><div className="eval-white" style={{ height: `${whitePercent}%`, top: flipped ? 0 : 'auto', bottom: flipped ? 'auto' : 0 }} /><span className={`eval-number ${(shownEval?.cp || 0) > 0 ? 'positive' : ''}`} style={{ top: flipped ? 6 : 'auto', bottom: flipped ? 'auto' : 6 }}>{evalText(shownEval)}</span></div>}
               <div className="board" role="group" aria-label="Chessboard">
                 {Array.from({ length: 64 }, (_, index) => {
                   const row = Math.floor(index / 8), col = index % 8;
@@ -488,8 +512,8 @@ function App() {
               </div>
             </div>
             {renderPlayer(bottomColor)}
-            <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || mode === 'online'} onClick={takeback}><RotateCcw size={17} /><span>Take back</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || mode === 'online'} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
-            {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : mode === 'online' && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
+            <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || (mode === 'online' && !onlineTakebackAvailable)} title={onlineCheats ? 'Undo your last move and any reply on both boards' : undefined} onClick={takeback}><RotateCcw size={17} /><span>Take back</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || onlineHintUnavailable} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
+            {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
           </section>
 
           <aside className="companion-column" aria-label="Game controls and analysis">
@@ -502,15 +526,15 @@ function App() {
             </section>
 
             <section className="moves-panel">
-              <div className="panel-tabs" role="tablist" aria-label="Game information"><button role="tab" aria-selected={tab === 'game'} className={tab === 'game' ? 'active' : ''} onClick={() => setTab('game')}><Swords size={16} />Game</button><button role="tab" disabled={mode === 'online' && online.room?.status !== 'finished'} title={mode === 'online' && online.room?.status !== 'finished' ? 'Analysis is available after the game' : undefined} aria-selected={tab === 'analysis'} className={tab === 'analysis' ? 'active' : ''} onClick={() => setTab('analysis')}><BarChart3 size={16} />Analysis<span className="free-label">FREE</span></button></div>
+              <div className="panel-tabs" role="tablist" aria-label="Game information"><button role="tab" aria-selected={tab === 'game'} className={tab === 'game' ? 'active' : ''} onClick={() => setTab('game')}><Swords size={16} />Game</button><button role="tab" disabled={!onlineAnalysisAllowed} title={!onlineAnalysisAllowed ? 'Analysis is available after the game' : undefined} aria-selected={tab === 'analysis'} className={tab === 'analysis' ? 'active' : ''} onClick={() => setTab('analysis')}><BarChart3 size={16} />Analysis<span className="free-label">FREE</span></button></div>
               {tab === 'game' ? <><div className="opening-label"><BookOpen size={14} /><span>{openingName(records)}</span>{records.length > 0 && <span className="move-count">{Math.ceil(records.length / 2)} moves</span>}</div><div className="move-list" ref={moveListRef}>{!records.length ? <div className="moves-empty"><div><KnightMark /></div><strong>The best stories start with a move.</strong><p>Your game will unfold here.<br />Select a piece to get started.</p></div> : Array.from({ length: Math.ceil(records.length / 2) }, (_, i) => <div className="move-pair" key={i}><span className="move-number">{i + 1}.</span>{[i * 2, i * 2 + 1].map(index => { const record = records[index]; return record ? <button key={index} className={`move-cell ${(reviewIndex ?? records.length) === index + 1 ? 'current' : ''}`} onClick={() => navigateReview(index + 1 === records.length ? null : index + 1)}><span>{record.san}</span>{record.quality && <span title={record.quality} className={`move-quality quality-${record.quality.toLowerCase()}`}>{QUALITY_SYMBOL[record.quality]}</span>}</button> : <span key={index} />; })}</div>)}</div></> : <div className="analysis-content"><div className="analysis-engine">
                   <div><Cpu size={16} /><strong>Stockfish</strong><span className="engine-version">18</span></div>
                   <span><i className={liveAnalysis.analyzing ? 'pulse' : ''} />{liveAnalysis.error ? 'Unavailable' : liveAnalysis.loading || engineStatus === 'loading' ? 'Loading…' : reviewing ? 'Reviewing…' : liveAnalysis.analyzing ? `Live · Depth ${shownEval?.depth || 0}` : shownEval ? `Depth ${shownEval.depth}` : 'Ready'}</span>
                 </div>
                 {liveAnalysis.error && <div className="live-analysis-error" role="alert"><span>Live analysis is unavailable.</span><button onClick={() => setEngineRetry(n => n + 1)}>Retry</button></div>}
                 <div className="position-evaluation"><strong>{evalText(shownEval)}</strong><div><span>{shownEval?.mate !== null && shownEval?.mate !== undefined ? 'Forced checkmate' : !shownEval || Math.abs(shownEval.cp) < 40 ? 'An even position' : shownEval.cp > 0 ? 'White has the advantage' : 'Black has the advantage'}</span><small>Evaluation from White’s perspective</small></div></div><div className="evaluation-track"><span style={{ width: `${whitePercent}%` }} /></div><div className="best-line"><span>BEST CONTINUATION</span><div>{shownEval?.pv.length ? pvToSan(boardFen, shownEval.pv).map((m, i) => <span key={i} className={i === 0 ? 'first' : ''}>{m}</span>) : <span className="muted">{liveAnalysis.analyzing || liveAnalysis.loading ? 'Finding the strongest line…' : position.isGameOver() ? 'Game over. Explore an earlier move.' : 'Play a move to explore the position.'}</span>}</div></div>{analyzed.length > 0 && <><div className="accuracy-row"><div><span>White accuracy</span><strong>{accuracyFor('w')}</strong></div><div><span>Black accuracy</span><strong>{accuracyFor('b')}</strong></div></div><p className="accuracy-note">Estimated from evaluation loss · {analyzed.length}/{records.length} moves analyzed</p><div className="eval-chart" aria-label="Evaluation throughout the game">{records.map((r, i) => <button key={i} title={`${i + 1}. ${r.san}: ${evalText(r.evaluation)}`} aria-label={`Review move ${i + 1}, ${r.san}`} onClick={() => navigateReview(i + 1 === records.length ? null : i + 1)} style={{ '--bar': `${Math.max(3, Math.min(48, Math.abs(r.evaluation?.cp || 0) / 8))}%` } as CSSProperties} className={(r.evaluation?.cp || 0) >= 0 ? 'up' : 'down'}><span /></button>)}</div></>}
-                {coachRecord && <div className="analysis-judgment"><span className={`judgment-badge quality-${(coachRecord.quality || 'good').toLowerCase()}`}>{coachRecord.quality ? QUALITY_SYMBOL[coachRecord.quality] : '…'}</span><div><span className="analysis-move-label">{mode === 'bot' && reviewIndex === null ? 'Your last move' : 'Selected move'}</span><strong>{coachRecord.san} <span>{coachRecord.quality || 'Not analyzed yet'}</span></strong><p>{explainMove(coachRecord)}</p></div></div>}
-                <button className="review-button secondary-button" disabled={!records.length || busy || reviewing || engineStatus !== 'ready' || onlineInProgress} onClick={() => void reviewGame()}>{reviewing ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{reviewing ? `Reviewing · ${reviewProgress}%` : 'Review full game'}<ArrowRight size={16} /></button>
+                {coachRecord && <div className="analysis-judgment"><span className={`judgment-badge quality-${(coachRecord.quality || 'good').toLowerCase()}`}>{coachRecord.quality ? QUALITY_SYMBOL[coachRecord.quality] : '…'}</span><div><span className="analysis-move-label">{(mode === 'bot' || onlineCheats) && reviewIndex === null ? 'Your last move' : 'Selected move'}</span><strong>{coachRecord.san} <span>{coachRecord.quality || 'Not analyzed yet'}</span></strong><p>{explainMove(coachRecord)}</p></div></div>}
+                <button className="review-button secondary-button" disabled={!records.length || busy || reviewing || engineStatus !== 'ready' || (onlineInProgress && !onlineCheats)} onClick={() => void reviewGame()}>{reviewing ? <LoaderCircle size={16} className="spin" /> : <Sparkles size={16} />}{reviewing ? `Reviewing · ${reviewProgress}%` : 'Review full game'}<ArrowRight size={16} /></button>
               </div>}
               <div className="move-navigation"><button aria-label="First position" disabled={!records.length || reviewIndex === 0} onClick={() => navigateReview(0)}><ChevronFirst size={19} /></button><button aria-label="Previous move" disabled={!records.length || reviewIndex === 0} onClick={() => navigateReview(Math.max(0, (reviewIndex ?? records.length) - 1))}><ChevronLeft size={21} /></button><button aria-label="Next move" disabled={!records.length || reviewIndex === null} onClick={() => navigateReview((reviewIndex || 0) + 1 >= records.length ? null : (reviewIndex || 0) + 1)}><ChevronRight size={21} /></button><button aria-label="Latest position" disabled={!records.length || reviewIndex === null} onClick={() => navigateReview(null)}><ChevronLast size={19} /></button>{reviewIndex !== null && <button className="return-live" onClick={() => navigateReview(null)}>Live <span /></button>}</div>
               <div className="game-status" aria-live="polite">{busy || reviewing ? <LoaderCircle size={12} className="spin" /> : <span className={`status-dot ${outcome ? 'finished' : ''}`} />}<span>{statusText}</span></div>

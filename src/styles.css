@@ -71,6 +71,18 @@ svg { flex-shrink: 0; stroke-width: 1.8; }
 .online-panel input, .online-panel select { min-width: 0; width: 100%; border: 1px solid var(--line); background: var(--sidebar); color: var(--text); border-radius: 6px; padding: 11px 12px; font-size: 12px; }
 .online-panel input::placeholder { color: var(--muted); opacity: 1; }
 .online-field input { margin-top: 8px; }
+.cheat-mode-setting { display: flex; align-items: center; gap: 15px; padding: 15px 0 18px; border-top: 1px solid var(--line); }
+.cheat-mode-setting > div { flex: 1; min-width: 0; }
+.cheat-mode-setting strong { font-size: 13px; font-weight: 550; }
+.cheat-mode-setting p { margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.cheat-mode-setting .toggle { flex-shrink: 0; }
+.cheat-mode-banner { display: flex; align-items: flex-start; gap: 10px; padding: 13px; margin: 15px 0; border-radius: 7px; color: var(--green); background: var(--green-subtle); }
+.cheat-mode-banner > div { display: flex; flex-direction: column; gap: 6px; }
+.cheat-mode-banner strong { font-size: 12px; font-weight: 550; }
+.cheat-mode-banner span { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.join-preview { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; font-size: 11px; line-height: 1.7; color: var(--muted); }
+.join-preview strong { color: var(--text); font-weight: 550; }
+.join-preview.assisted strong { color: var(--green); }
 .online-options { display: flex; gap: 12px; margin: 15px 0 20px; }
 .online-options label { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); }
 .online-options select { display: block; margin-top: 8px; padding: 10px 8px; }

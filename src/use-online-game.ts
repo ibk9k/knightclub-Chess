@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { OnlineAction, OnlineRoom } from './online-types';
+import type { OnlineAction, OnlineRoom, RoomPreview } from './online-types';
 
 const SAVED_ROOM = 'knight-club-online-room';
 export function normalizeRoomCode(value: string) {
   let code = value.trim();
   try { code = new URL(code).searchParams.get('join') || code; } catch { /* A room code is also accepted. */ }
   return code.replace(/[\s-]/g, '').toUpperCase();
+}
+export async function previewRoom(value: string, signal: AbortSignal): Promise<RoomPreview> {
+  const code = normalizeRoomCode(value);
+  const response = await fetch(`/api/online/rooms/${code}/preview`, { credentials: 'same-origin', cache: 'no-store', signal });
+  const result = await response.json() as RoomPreview & { error?: string };
+  if (!response.ok) throw new Error(result.error || 'Could not check this room. Please try again.');
+  if (result.code !== code || typeof result.cheatMode !== 'boolean') throw new Error('Could not read the room settings.');
+  return result;
 }
 class OnlineError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 async function api(path: string, body?: unknown): Promise<OnlineRoom> {
@@ -103,11 +111,11 @@ export function useOnlineGame() {
     } finally { locked.current = false; setPending(false); }
   }, [accept]);
 
-  const create = (kind: 'private' | 'public', name: string, color: string, timeControl: number) => request(kind === 'public' ? 'match' : 'rooms', { name, color, timeControl }, true);
-  const join = (code: string, name: string) => {
+  const create = (kind: 'private' | 'public', name: string, color: string, timeControl: number, cheatMode = false) => request(kind === 'public' ? 'match' : 'rooms', { name, color, timeControl, cheatMode }, true);
+  const join = (code: string, name: string, acceptCheatMode = false) => {
     const normalized = normalizeRoomCode(code);
     if (!/^[A-Z2-9]{8}$/.test(normalized)) { setError('Enter an 8-character room code or paste an invite link.'); return Promise.resolve(null); }
-    return request(`rooms/${normalized}/join`, { name }, true);
+    return request(`rooms/${normalized}/join`, { name, acceptCheatMode }, true);
   };
   const move = (uci: string) => roomRef.current ? request(`rooms/${roomRef.current.code}/move`, { move: uci, version: roomRef.current.version }) : Promise.resolve(null);
   const action = (action: OnlineAction) => roomRef.current ? request(`rooms/${roomRef.current.code}/action`, { action, version: roomRef.current.version }) : Promise.resolve(null);

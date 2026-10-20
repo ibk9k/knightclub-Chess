@@ -13,6 +13,7 @@ export const chessRooms = sqliteTable('chess_rooms', {
   fen: text('fen').notNull(),
   version: integer('version').notNull(),
   timeControl: integer('time_control').notNull(),
+  cheatMode: integer('cheat_mode').notNull().default(0),
   whiteMs: integer('white_ms').notNull(),
   blackMs: integer('black_ms').notNull(),
   turnStartedAt: integer('turn_started_at'),
@@ -26,5 +27,5 @@ export const chessRooms = sqliteTable('chess_rooms', {
   updatedAt: integer('updated_at').notNull(),
 }, table => [
   index('chess_queue').on(table.status, table.visibility, table.timeControl, table.createdAt),
-  uniqueIndex('one_waiting_match_per_clock').on(table.timeControl).where(sql`${table.status} = 'waiting' AND ${table.visibility} = 'public'`),
+  uniqueIndex('one_waiting_match_per_clock').on(table.timeControl, table.cheatMode).where(sql`${table.status} = 'waiting' AND ${table.visibility} = 'public'`),
 ]);

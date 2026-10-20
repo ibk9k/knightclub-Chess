@@ -11,6 +11,7 @@ export interface OnlineRoom {
   fen: string;
   version: number;
   timeControl: number;
+  cheatMode: boolean;
   clocks: { w: number; b: number };
   clockRunning: boolean;
   serverNow: number;
@@ -19,4 +20,5 @@ export interface OnlineRoom {
   rematchOffer: Color | null;
   round: number;
 }
-export type OnlineAction = 'resign' | 'cancel' | 'offer-draw' | 'accept-draw' | 'decline-draw' | 'request-rematch' | 'accept-rematch' | 'decline-rematch';
+export interface RoomPreview { code: string; cheatMode: boolean; timeControl: number; status: OnlineRoom['status'] }
+export type OnlineAction = 'resign' | 'cancel' | 'offer-draw' | 'accept-draw' | 'decline-draw' | 'request-rematch' | 'accept-rematch' | 'decline-rematch' | 'takeback';

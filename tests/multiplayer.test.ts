@@ -146,6 +146,80 @@ test('cross-site writes are refused and seat cookies are private', async () => {
   assert.match(created.headers.get('set-cookie')!, /HttpOnly; SameSite=Lax;.*Secure/);
 });
 
+test('cheat mode is a shared, fixed room setting and is disclosed before joining', async () => {
+  const { player } = fixture(), host = player('Host'), guest = player('Guest');
+  let room = await host.request('rooms', { cheatMode: true, color: 'w' }, 201);
+  assert.equal(room.cheatMode, true);
+  const preview = await guest.request(`rooms/${room.code}/preview`);
+  assert.deepEqual(Object.keys(preview).sort(), ['cheatMode', 'code', 'status', 'timeControl']);
+  assert.equal(preview.cheatMode, true, 'The invitation discloses assistance without revealing the board or seats');
+  await guest.request(`rooms/${room.code}/join`, {}, 409);
+  room = await guest.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
+  assert.equal(room.cheatMode, true); assert.equal((await host.request(`rooms/${room.code}`)).cheatMode, true);
+  room = await guest.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  room = await host.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: room.version });
+  room = await guest.request(`rooms/${room.code}/action`, { action: 'accept-rematch', version: room.version });
+  assert.equal(room.cheatMode, true, 'A rematch retains the shared setting');
+  await host.request('rooms', { cheatMode: 'true' }, 400);
+});
+
+test('standard rooms enforce takeback restrictions on the server', async () => {
+  const { player } = fixture(), white = player('White'), black = player('Black');
+  let room = await white.create(); assert.equal(room.cheatMode, false);
+  room = await black.request(`rooms/${room.code}/join`, { cheatMode: true });
+  assert.equal(room.cheatMode, false, 'A joining player cannot change the room setting');
+  room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  await white.request(`rooms/${room.code}/action`, { action: 'takeback', cheatMode: true, version: room.version }, 403);
+  assert.deepEqual((await black.request(`rooms/${room.code}`)).moves, ['e2e4']);
+});
+
+test('matchmaking keeps assisted and standard games in separate queues', async () => {
+  const { player } = fixture();
+  const standard = await player('Standard').request('match', { cheatMode: false }, 201);
+  const assisted = await player('Assisted').request('match', { cheatMode: true }, 201);
+  assert.notEqual(standard.code, assisted.code);
+  const standardMatch = await player('Standard two').request('match', { cheatMode: false });
+  const assistedMatch = await player('Assisted two').request('match', { cheatMode: true });
+  assert.equal(standardMatch.code, standard.code); assert.equal(standardMatch.cheatMode, false);
+  assert.equal(assistedMatch.code, assisted.code); assert.equal(assistedMatch.cheatMode, true);
+});
+
+test('either assisted player can undo their own last move and a reply on both boards', async () => {
+  const { player } = fixture(), white = player('White'), black = player('Black');
+  let room = await white.request('rooms', { cheatMode: true, color: 'w' }, 201);
+  room = await black.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
+  await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version }, 409);
+  room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  await black.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version }, 409);
+  room = await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  assert.deepEqual(room.moves, []); assert.equal(room.fen, new Chess().fen());
+  room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  room = await black.request(`rooms/${room.code}/move`, { move: 'e7e5', version: room.version });
+  room = await white.request(`rooms/${room.code}/move`, { move: 'g1f3', version: room.version });
+  const stale = room.version;
+  room = await black.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  const expected = new Chess(); expected.move('e4');
+  assert.deepEqual(room.moves, ['e2e4']); assert.equal(room.fen, expected.fen());
+  assert.equal((await white.request(`rooms/${room.code}`)).fen, room.fen);
+  await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: stale }, 409);
+  room = await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  assert.equal(room.fen, new Chess().fen());
+  room = await white.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  await black.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version }, 409);
+});
+
+test('assisted takebacks do not refund elapsed time or restart the first-move grace period', async () => {
+  const { player, sql } = fixture(), white = player('White'), black = player('Black');
+  let room = await white.request('rooms', { cheatMode: true, color: 'w', timeControl: 3 }, 201);
+  room = await black.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
+  room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  room = await black.request(`rooms/${room.code}/move`, { move: 'e7e5', version: room.version });
+  sql.prepare('UPDATE chess_rooms SET white_ms = 59000, black_ms = 57000, turn_started_at = ? WHERE code = ?').run(Date.now() - 3000, room.code);
+  room = await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  assert.ok(room.clocks.w <= 56000); assert.equal(room.clocks.b, 57000);
+  assert.equal(room.clockRunning, true); assert.deepEqual(room.moves, []);
+});
+
 test('rematches require both original players, keep the room and clock, and swap colors', async () => {
   const { player } = fixture(), white = player('Alice'), black = player('Bob'), stranger = player('Visitor');
   let room = await white.create('rooms', 5);
