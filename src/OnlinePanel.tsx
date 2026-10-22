@@ -10,6 +10,7 @@ export function OnlinePanel({ online, notify, onLeave }: { online: OnlineGame; n
   const [color, setColor] = useState('random');
   const [minutes, setMinutes] = useState(0);
   const [cheatMode, setCheatMode] = useState(false);
+  const [directTakebacks, setDirectTakebacks] = useState(false);
   const [invitePreview, setInvitePreview] = useState<RoomPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
@@ -49,20 +50,21 @@ export function OnlinePanel({ online, notify, onLeave }: { online: OnlineGame; n
         <label>Play as<select aria-label="Online color" value={color} onChange={e => setColor(e.target.value)}><option value="random">Random color</option><option value="w">White</option><option value="b">Black</option></select></label>
         <label>Time control<select aria-label="Online time control" value={minutes} onChange={e => setMinutes(Number(e.target.value))}>{[0, 3, 5, 10, 15, 30].map(value => <option key={value} value={value}>{value ? `${value} min` : 'No clock'}</option>)}</select></label>
       </div>
-      <div className="cheat-mode-setting"><div><strong id="cheat-mode-label">Cheat mode</strong><p id="cheat-mode-description">Stockfish bar, hints, takebacks, and move analysis for both players.</p></div><button role="switch" aria-labelledby="cheat-mode-label" aria-describedby="cheat-mode-description" aria-checked={cheatMode} disabled={pending} className={`toggle ${cheatMode ? 'on' : ''}`} onClick={() => setCheatMode(value => !value)}><span /></button></div>
-      <button className="primary-button full-width" disabled={pending} onClick={() => { rememberName(); void online.create('private', name, color, minutes, cheatMode); }}>{pending ? <LoaderCircle size={17} className="spin" /> : <LockKeyhole size={17} />}Create private room</button>
+      <div className="cheat-mode-setting"><div><strong id="cheat-mode-label">Cheat mode</strong><p id="cheat-mode-description">Stockfish bar and move analysis for both players. Direct hints are off.</p></div><button role="switch" aria-labelledby="cheat-mode-label" aria-describedby="cheat-mode-description" aria-checked={cheatMode} disabled={pending} className={`toggle ${cheatMode ? 'on' : ''}`} onClick={() => { setCheatMode(value => !value); setDirectTakebacks(false); }}><span /></button></div>
+      {cheatMode && <div className="cheat-mode-setting direct-takeback-setting"><div><strong id="direct-takeback-label">Allow direct takebacks</strong><p id="direct-takeback-description">{directTakebacks ? 'Either player can undo their last move without asking.' : 'Off by default. Takebacks need your opponent’s approval.'}</p></div><button role="switch" aria-labelledby="direct-takeback-label" aria-describedby="direct-takeback-description" aria-checked={directTakebacks} disabled={pending} className={`toggle ${directTakebacks ? 'on' : ''}`} onClick={() => setDirectTakebacks(value => !value)}><span /></button></div>}
+      <button className="primary-button full-width" disabled={pending} onClick={() => { rememberName(); void online.create('private', name, color, minutes, cheatMode, directTakebacks); }}>{pending ? <LoaderCircle size={17} className="spin" /> : <LockKeyhole size={17} />}Create private room</button>
       <p className="online-option-note">Only someone with your code or invite link can join.</p>
-      <button className="secondary-button full-width" disabled={pending} onClick={() => { rememberName(); void online.create('public', name, 'random', minutes, cheatMode); }}><Radio size={17} />Find a random opponent</button>
+      <button className="secondary-button full-width" disabled={pending} onClick={() => { rememberName(); void online.create('public', name, 'random', minutes, cheatMode, directTakebacks); }}><Radio size={17} />Find a random opponent</button>
       <p className="online-option-note">Matched with the same cheat-mode setting. Invite a friend while you wait, too.</p>
       <form className="join-room-form" onSubmit={event => { event.preventDefault(); rememberName(); void online.join(joinCode, name, previewMatches && invitePreview.cheatMode); }}>
         <label htmlFor="room-code">Have an invite?</label><div><input id="room-code" value={joinCode} onChange={e => setJoinCode(e.target.value)} placeholder="Room code or invite link" autoCapitalize="characters" autoComplete="off" spellCheck={false} maxLength={250} /><button className="secondary-button" disabled={pending || !joinCode.trim() || previewLoading || validCode && !previewMatches} type="submit">{previewMatches && invitePreview.cheatMode ? 'Join with cheats' : 'Join'}</button></div>
         {previewLoading && <p className="online-option-note" role="status">Checking room settings…</p>}
-        {previewMatches && <div className={`join-preview ${invitePreview.cheatMode ? 'assisted' : ''}`} role="status"><strong>{invitePreview.cheatMode ? 'Cheat mode is on' : 'Standard game'}</strong><span>{invitePreview.cheatMode ? 'Both players get Stockfish, hints, takebacks, and move analysis.' : 'Engine assistance and takebacks are off during play.'} {invitePreview.timeControl ? `${invitePreview.timeControl} min per player.` : 'No clock.'}</span></div>}
+        {previewMatches && <div className={`join-preview ${invitePreview.cheatMode ? 'assisted' : ''}`} role="status"><strong>{invitePreview.cheatMode ? 'Cheat mode is on' : 'Standard game'}</strong><span>{invitePreview.cheatMode ? `Shared Stockfish and move analysis. Direct hints are off. ${invitePreview.directTakebacks ? 'Direct takebacks are allowed.' : 'Takebacks need opponent approval.'}` : 'Engine assistance and takebacks are off during play.'} {invitePreview.timeControl ? `${invitePreview.timeControl} min per player.` : 'No clock.'}</span></div>}
         {previewError && <div className="input-error online-error" role="alert"><p>{previewError}</p><button className="text-button" type="button" onClick={() => setPreviewAttempt(value => value + 1)}>Retry room check</button></div>}
       </form>
     </> : <>
       <div className={`online-room-status ${room.status}`} aria-live="polite"><span className="status-dot" /><strong>{room.status === 'waiting' ? room.visibility === 'public' ? 'Looking for a player…' : 'Waiting for your friend' : room.status === 'active' ? 'Game in progress' : 'Game finished'}</strong></div>
-      {room.cheatMode && <div className="cheat-mode-banner"><Sparkles size={18} /><div><strong>Cheat mode enabled</strong><span>The same Stockfish tools and takebacks for both players.</span></div></div>}
+      {room.cheatMode && <div className="cheat-mode-banner"><Sparkles size={18} /><div><strong>Cheat mode enabled</strong><span>Shared Stockfish and analysis. Direct hints are off. {room.directTakebacks ? 'Direct takebacks allowed.' : 'Takebacks need opponent approval.'}</span></div></div>}
       {room.status === 'waiting' && <p className="online-description">{room.visibility === 'public' ? 'We’ll pair you with the next player using this time control. Or send this invite to a friend.' : 'Send your invite link or room code. The game starts when a second player joins.'}</p>}
       {(room.status === 'waiting' || room.status === 'active') && <>
         <div className="room-code-box"><span>ROOM CODE</span><div><strong>{room.code}</strong><button className="icon-button" aria-label="Copy room code" title="Copy room code" onClick={() => void copy(room.code, 'Room code')}>{copyIcon('Room code')}</button></div></div>
@@ -80,6 +82,6 @@ export function OnlinePanel({ online, notify, onLeave }: { online: OnlineGame; n
     </>}
     {connection === 'reconnecting' && room && <p className="online-reconnect" role="status"><LoaderCircle size={14} className="spin" />Connection lost. Reconnecting…</p>}
     {error && connection !== 'reconnecting' && <p className="input-error online-error" role="alert">{error}</p>}
-    <div className="online-fair-play">No account needed. {room?.cheatMode || !room && cheatMode ? 'Cheat mode gives both players equal access to engine tools. Takebacks undo your last move and any reply; clocks are not refunded.' : 'Standard games keep hints, analysis, and takebacks off during play.'}</div>
+    <div className="online-fair-play">No account needed. {room?.cheatMode || !room && cheatMode ? 'Both players have the same analysis tools. Takebacks undo your last move and any reply. Requests expire on the next move; clocks keep running and time is not refunded.' : 'Standard games keep hints, analysis, and takebacks off during play.'}</div>
   </div>;
 }

@@ -151,7 +151,7 @@ test('cheat mode is a shared, fixed room setting and is disclosed before joining
   let room = await host.request('rooms', { cheatMode: true, color: 'w' }, 201);
   assert.equal(room.cheatMode, true);
   const preview = await guest.request(`rooms/${room.code}/preview`);
-  assert.deepEqual(Object.keys(preview).sort(), ['cheatMode', 'code', 'status', 'timeControl']);
+  assert.deepEqual(Object.keys(preview).sort(), ['cheatMode', 'code', 'directTakebacks', 'status', 'timeControl']);
   assert.equal(preview.cheatMode, true, 'The invitation discloses assistance without revealing the board or seats');
   await guest.request(`rooms/${room.code}/join`, {}, 409);
   room = await guest.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
@@ -184,9 +184,9 @@ test('matchmaking keeps assisted and standard games in separate queues', async (
   assert.equal(assistedMatch.code, assisted.code); assert.equal(assistedMatch.cheatMode, true);
 });
 
-test('either assisted player can undo their own last move and a reply on both boards', async () => {
+test('either directly assisted player can undo their own last move and a reply on both boards', async () => {
   const { player } = fixture(), white = player('White'), black = player('Black');
-  let room = await white.request('rooms', { cheatMode: true, color: 'w' }, 201);
+  let room = await white.request('rooms', { cheatMode: true, directTakebacks: true, color: 'w' }, 201);
   room = await black.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
   await white.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version }, 409);
   room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
@@ -210,7 +210,7 @@ test('either assisted player can undo their own last move and a reply on both bo
 
 test('assisted takebacks do not refund elapsed time or restart the first-move grace period', async () => {
   const { player, sql } = fixture(), white = player('White'), black = player('Black');
-  let room = await white.request('rooms', { cheatMode: true, color: 'w', timeControl: 3 }, 201);
+  let room = await white.request('rooms', { cheatMode: true, directTakebacks: true, color: 'w', timeControl: 3 }, 201);
   room = await black.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
   room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
   room = await black.request(`rooms/${room.code}/move`, { move: 'e7e5', version: room.version });
@@ -257,6 +257,81 @@ test('rematches can be declined, and mutual requests start only one new round', 
   assert.equal(room.round, 2); assert.equal(room.status, 'active');
   await a.request(`rooms/${room.code}/action`, { action: 'accept-rematch', version: room.version }, 409);
   assert.equal((await b.request(`rooms/${room.code}`)).round, 2);
+});
+
+test('takebacks require the opponent’s approval by default and cannot be self-approved or forged', async () => {
+  const { player } = fixture(), white = player('White'), black = player('Black'), stranger = player('Stranger');
+  let room = await white.request('rooms', { cheatMode: true, color: 'w' }, 201);
+  assert.equal(room.directTakebacks, false);
+  room = await black.request(`rooms/${room.code}/join`, { acceptCheatMode: true, directTakebacks: true });
+  assert.equal(room.directTakebacks, false);
+  room = await white.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  room = await black.request(`rooms/${room.code}/move`, { move: 'e7e5', version: room.version });
+  const fen = room.fen, beforeMoves = room.moves;
+  room = await white.request(`rooms/${room.code}/action`, { action: 'takeback', directTakebacks: true, version: room.version });
+  assert.equal(room.takebackOffer, 'w'); assert.equal(room.fen, fen); assert.deepEqual(room.moves, beforeMoves);
+  await white.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version }, 409);
+  await white.request(`rooms/${room.code}/action`, { action: 'decline-takeback', version: room.version }, 409);
+  await stranger.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version }, 403);
+  await black.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version }, 409);
+  room = await black.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version });
+  assert.deepEqual(room.moves, []); assert.equal(room.fen, new Chess().fen()); assert.equal(room.takebackOffer, null);
+  room = await white.request(`rooms/${room.code}/move`, { move: 'd2d4', version: room.version });
+  room = await black.request(`rooms/${room.code}/move`, { move: 'd7d5', version: room.version });
+  room = await black.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  room = await white.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version });
+  assert.deepEqual(room.moves, ['d2d4'], 'The same approval flow works for Black');
+});
+
+test('takeback requests can be declined or withdrawn and expire when another move is played', async () => {
+  const { player } = fixture(), a = player('A'), b = player('B');
+  let room = await a.request('rooms', { cheatMode: true, color: 'w' }, 201);
+  room = await b.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
+  room = await a.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  room = await a.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  room = await b.request(`rooms/${room.code}/action`, { action: 'decline-takeback', version: room.version });
+  assert.equal(room.takebackOffer, null); assert.deepEqual(room.moves, ['e2e4']);
+  room = await a.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  await b.request(`rooms/${room.code}/action`, { action: 'cancel-takeback', version: room.version }, 409);
+  room = await a.request(`rooms/${room.code}/action`, { action: 'cancel-takeback', version: room.version });
+  assert.equal(room.takebackOffer, null);
+  room = await a.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  const requestVersion = room.version;
+  room = await b.request(`rooms/${room.code}/move`, { move: 'e7e5', version: room.version });
+  assert.equal(room.takebackOffer, null);
+  await b.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: requestVersion }, 409);
+  await b.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version }, 409);
+  room = await a.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  room = await b.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  assert.equal(room.takebackOffer, null);
+});
+
+test('direct-takeback preferences are validated, previewed, matched, and preserved in rematches', async () => {
+  const { player } = fixture(), a = player('A'), b = player('B');
+  await a.request('rooms', { directTakebacks: true }, 400);
+  await a.request('rooms', { cheatMode: true, directTakebacks: 'true' }, 400);
+  const approval = await player('Approval').request('match', { cheatMode: true }, 201);
+  const direct = await a.request('match', { cheatMode: true, directTakebacks: true }, 201);
+  assert.notEqual(direct.code, approval.code);
+  assert.equal((await b.request(`rooms/${direct.code}/preview`)).directTakebacks, true);
+  let room = await b.request('match', { cheatMode: true, directTakebacks: true });
+  assert.equal(room.code, direct.code);
+  room = await b.request(`rooms/${room.code}/action`, { action: 'resign', version: room.version });
+  room = await a.request(`rooms/${room.code}/action`, { action: 'request-rematch', version: room.version });
+  room = await b.request(`rooms/${room.code}/action`, { action: 'accept-rematch', version: room.version });
+  assert.equal(room.directTakebacks, true); assert.equal(room.takebackOffer, null);
+});
+
+test('waiting for takeback approval never stops or refunds the clock', async () => {
+  const { player, sql } = fixture(), a = player('A'), b = player('B');
+  let room = await a.request('rooms', { cheatMode: true, color: 'w', timeControl: 3 }, 201);
+  room = await b.request(`rooms/${room.code}/join`, { acceptCheatMode: true });
+  room = await a.request(`rooms/${room.code}/move`, { move: 'e2e4', version: room.version });
+  sql.prepare('UPDATE chess_rooms SET turn_started_at = ? WHERE code = ?').run(Date.now() - 3000, room.code);
+  room = await a.request(`rooms/${room.code}/action`, { action: 'takeback', version: room.version });
+  assert.ok(room.clocks.b <= 177000); assert.equal(room.clockRunning, true);
+  room = await b.request(`rooms/${room.code}/action`, { action: 'accept-takeback', version: room.version });
+  assert.ok(room.clocks.b <= 177000); assert.equal(room.clockRunning, true); assert.deepEqual(room.moves, []);
 });
 
 test('material counts captures, trades, promotions, and the displayed historical position', () => {

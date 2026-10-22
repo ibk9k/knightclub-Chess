@@ -144,7 +144,7 @@ export function useOnlineGame() {
     } finally { locked.current = false; setPending(false); if (prediction && token === epoch.current) setPendingMove(null); }
   }, [accept]);
 
-  const create = (kind: 'private' | 'public', name: string, color: string, timeControl: number, cheatMode = false) => request(kind === 'public' ? 'match' : 'rooms', { name, color, timeControl, cheatMode }, true);
+  const create = (kind: 'private' | 'public', name: string, color: string, timeControl: number, cheatMode = false, directTakebacks = false) => request(kind === 'public' ? 'match' : 'rooms', { name, color, timeControl, cheatMode, directTakebacks: cheatMode && directTakebacks }, true);
   const join = (code: string, name: string, acceptCheatMode = false) => {
     const normalized = normalizeRoomCode(code);
     if (!/^[A-Z2-9]{8}$/.test(normalized)) { setError('Enter an 8-character room code or paste an invite link.'); return Promise.resolve(null); }

@@ -6,7 +6,7 @@ async (page) => {
   const assert = (condition, message) => { if (!condition) throw new Error(message); results.push(message); };
   assert(await page.locator('.analysis-content').count() === 1, 'Bot games show analysis by default');
   await page.evaluate(() => {
-    window.__dragProbe = { started: false, image: null };
+    window.__dragProbe = { started: false };
     window.__liveDepths = [];
     const observer = new MutationObserver(() => {
       const status = document.querySelector('.game-status')?.textContent || '';
@@ -18,15 +18,7 @@ async (page) => {
     });
     observer.observe(document.querySelector('.moves-panel'), { childList: true, subtree: true, characterData: true });
     window.__liveObserver = observer;
-    document.addEventListener('dragstart', event => {
-      window.__dragProbe.started = true;
-      const transfer = event.dataTransfer;
-      const original = transfer.setDragImage.bind(transfer);
-      transfer.setDragImage = (image, x, y) => {
-        window.__dragProbe.image = { tag: image.tagName, className: image.className, background: getComputedStyle(image).backgroundColor };
-        original(image, x, y);
-      };
-    }, { capture: true, once: true });
+    document.addEventListener('dragstart', () => { window.__dragProbe.started = true; }, { capture: true, once: true });
   });
   const knight = page.getByRole('button', { name: 'g1 white knight', exact: true });
   await knight.scrollIntoViewIfNeeded();
@@ -37,9 +29,10 @@ async (page) => {
   await page.mouse.move(from.x + from.width / 2 - 15, from.y + from.height / 2 - 15, { steps: 5 });
   await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
   const probe = await page.evaluate(() => window.__dragProbe);
+  const preview = await page.locator('.drag-piece').count();
   await page.mouse.up();
-  assert(probe.started, 'Native piece dragging starts');
-  assert(probe.image?.tag === 'IMG' && probe.image.className === 'piece' && probe.image.background === 'rgba(0, 0, 0, 0)', 'Drag preview contains only the transparent chess piece');
+  assert(!probe.started, 'Piece dragging never starts the native browser drag UI');
+  assert(preview === 1, 'Drag preview contains only the floating chess piece');
   await page.getByRole('button', { name: /^f3 white knight/ }).waitFor();
   await page.waitForFunction(() => document.querySelector('.game-status')?.textContent?.includes('Your move'));
   assert((await page.locator('.breadcrumb').textContent()).includes('Computer'), 'Live analysis leaves the bot game active');

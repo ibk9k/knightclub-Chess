@@ -72,7 +72,8 @@ async (basePage) => {
     assert((await explanation(host).textContent()).includes('Pawns move one square forward') && sent === 0, 'Standard online rooms explain rejected moves locally without sending them');
     assert(await host.getByRole('button', { name: 'Hint', exact: true }).isDisabled() && await host.getByRole('tab', { name: 'Analysis FREE' }).isDisabled(), 'Rules help preserves standard online assistance restrictions');
     await square(guest, 'e7').click();
-    assert((await explanation(guest).textContent()).includes('opponent’s turn'), 'An online player gets a clear turn explanation');
+    assert(await square(guest, 'e7').getAttribute('aria-pressed') === 'true', 'An online player can select their own piece to prepare a premove while waiting');
+    await guest.keyboard.press('Escape');
     await attempt(host, 'e2', 'e4');
     await guest.getByRole('button', { name: 'e4 white pawn', exact: true }).waitFor();
     assert(await guest.locator('.move-rule-notice').count() === 0, 'An opponent’s move clears an outdated explanation');

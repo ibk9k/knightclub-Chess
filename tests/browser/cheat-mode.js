@@ -18,6 +18,7 @@ async (basePage) => {
     await host.getByRole('textbox', { name: /Your name/ }).fill('Alice');
     await host.getByRole('combobox', { name: 'Online color' }).selectOption('w');
     await toggle.click();
+    await host.getByRole('switch', { name: 'Allow direct takebacks', exact: true }).click();
     await host.getByRole('button', { name: 'Create private room', exact: true }).click();
     await host.locator('.online-room-status.waiting').waitFor();
     let code = (await host.locator('.room-code-box strong').textContent()).trim();
@@ -33,15 +34,9 @@ async (basePage) => {
       assert(await actor.locator('.evaluation-bar').isVisible(), 'A player has the live Stockfish evaluation bar');
       assert(await actor.getByRole('tab', { name: 'Analysis FREE' }).isEnabled(), 'A player can open analysis during the game');
     }
-    assert(await host.getByRole('button', { name: 'Hint', exact: true }).isEnabled() && await guest.getByRole('button', { name: 'Hint', exact: true }).isDisabled(), 'Hints are available on the player’s own turn');
-    await host.getByRole('button', { name: 'Hint', exact: true }).click();
-    await host.getByRole('status').filter({ hasText: /^Try / }).waitFor();
-    assert(await host.locator('.hint-square').count() === 2, 'White receives a real Stockfish move hint');
+    assert(await host.getByRole('button', { name: 'Hint', exact: true }).isDisabled() && await guest.getByRole('button', { name: 'Hint', exact: true }).isDisabled(), 'Direct hints remain disabled for both assisted players');
     await play(host, 'e2', 'e4');
     await guest.getByRole('button', { name: 'e4 white pawn', exact: true }).waitFor();
-    await guest.getByRole('button', { name: 'Hint', exact: true }).click();
-    await guest.getByRole('status').filter({ hasText: /^Try / }).waitFor();
-    assert(await guest.locator('.hint-square').count() === 2, 'Black receives the same Stockfish hint feature');
     await play(guest, 'e7', 'e5');
     await host.getByRole('button', { name: 'e5 black pawn', exact: true }).waitFor();
     await play(host, 'g1', 'f3');

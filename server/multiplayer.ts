@@ -21,7 +21,7 @@ interface RoomRow {
   white_seen: number; black_seen: number; draw_offer: Color | null;
   outcome: string | null; created_at: number; updated_at: number;
   rematch_offer: Color | null; round: number;
-  cheat_mode: number;
+  cheat_mode: number; direct_takebacks: number; takeback_offer: Color | null;
 }
 const COOKIE = 'kc_player';
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -74,7 +74,7 @@ async function settleRoom(db: RoomDatabase, room: RoomRow, now: number): Promise
   const flag = room.status === 'active' && room.time_control > 0 && (clocks.w <= 0 || clocks.b <= 0);
   if (!expired && !flag) return room;
   const result = flag ? `${clocks.w <= 0 ? 'Black' : 'White'} wins on time` : 'Room expired';
-  await db.prepare('UPDATE chess_rooms SET status = ?, outcome = ?, white_ms = ?, black_ms = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ?')
+  await db.prepare('UPDATE chess_rooms SET status = ?, outcome = ?, white_ms = ?, black_ms = ?, takeback_offer = NULL, version = version + 1, updated_at = ? WHERE code = ? AND version = ?')
     .bind(expired ? 'cancelled' : 'finished', result, clocks.w, clocks.b, now, room.code, room.version).run();
   return readRoom(db, room.code);
 }
@@ -83,6 +83,7 @@ function snapshot(room: RoomRow, seat: Color, now: number): OnlineRoom {
     players: { w: room.white_name, b: room.black_name },
     connected: { w: !!room.white_key && now - room.white_seen < 20_000, b: !!room.black_key && now - room.black_seen < 20_000 },
     moves: JSON.parse(room.moves), fen: room.fen, version: room.version, timeControl: room.time_control, cheatMode: room.cheat_mode === 1,
+    directTakebacks: room.cheat_mode === 1 && room.direct_takebacks === 1, takebackOffer: room.takeback_offer,
     clocks: clocksAt(room, now), clockRunning: room.status === 'active' && room.turn_started_at !== null && room.time_control > 0,
     serverNow: now, drawOffer: room.draw_offer, outcome: room.outcome, rematchOffer: room.rematch_offer, round: room.round };
 }
@@ -118,6 +119,9 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
       if (![0, 3, 5, 10, 15, 30].includes(minutes)) throw new RoomError('Choose a valid time control.');
       if (body.cheatMode !== undefined && typeof body.cheatMode !== 'boolean') throw new RoomError('Choose whether cheat mode is on or off.');
       const cheatMode = body.cheatMode === true ? 1 : 0;
+      if (body.directTakebacks !== undefined && typeof body.directTakebacks !== 'boolean') throw new RoomError('Choose whether direct takebacks are on or off.');
+      if (body.directTakebacks === true && !cheatMode) throw new RoomError('Direct takebacks require cheat mode.');
+      const directTakebacks = cheatMode && body.directTakebacks === true ? 1 : 0;
       const name = cleanName(body.name);
       // One waiting lobby per browser keeps closed or repeatedly clicked queues
       // from collecting opponents. Private rooms never enter this queue.
@@ -125,8 +129,8 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
       await db.prepare("DELETE FROM chess_rooms WHERE code IN (SELECT code FROM chess_rooms WHERE updated_at < ? AND status IN ('finished', 'cancelled', 'waiting') LIMIT 20)").bind(now - 7 * DAY).run();
       await db.prepare("UPDATE chess_rooms SET status = 'cancelled', outcome = 'Queue expired', version = version + 1 WHERE status = 'waiting' AND visibility = 'public' AND white_seen < ? AND black_seen < ?").bind(now - 15_000, now - 15_000).run();
       if (path[0] === 'match') {
-        const candidates = await db.prepare("SELECT * FROM chess_rooms WHERE visibility = 'public' AND status = 'waiting' AND time_control = ? AND cheat_mode = ? AND created_at > ? AND (white_seen > ? OR black_seen > ?) ORDER BY created_at LIMIT 6")
-          .bind(minutes, cheatMode, now - DAY, now - 15_000, now - 15_000).all<RoomRow>();
+        const candidates = await db.prepare("SELECT * FROM chess_rooms WHERE visibility = 'public' AND status = 'waiting' AND time_control = ? AND cheat_mode = ? AND direct_takebacks = ? AND created_at > ? AND (white_seen > ? OR black_seen > ?) ORDER BY created_at LIMIT 6")
+          .bind(minutes, cheatMode, directTakebacks, now - DAY, now - 15_000, now - 15_000).all<RoomRow>();
         for (const candidate of candidates.results) {
           if (seatFor(candidate, key)) continue;
           try { const claimed = await claimRoom(db, candidate, key, name, now); return reply(snapshot(claimed, seatFor(claimed, key)!, now)); }
@@ -138,16 +142,16 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
         // The partial unique index allows one waiting public room for each
         // clock and assistance setting. A simultaneous second search joins it.
         if (path[0] === 'match') {
-          const waiting = await db.prepare("SELECT * FROM chess_rooms WHERE visibility = 'public' AND status = 'waiting' AND time_control = ? AND cheat_mode = ? LIMIT 1").bind(minutes, cheatMode).first<RoomRow>();
+          const waiting = await db.prepare("SELECT * FROM chess_rooms WHERE visibility = 'public' AND status = 'waiting' AND time_control = ? AND cheat_mode = ? AND direct_takebacks = ? LIMIT 1").bind(minutes, cheatMode, directTakebacks).first<RoomRow>();
           if (waiting && !seatFor(waiting, key)) {
             try { const joined = await claimRoom(db, waiting, key, name, now); return reply(snapshot(joined, seatFor(joined, key)!, now)); }
             catch (error) { if (!(error instanceof RoomError) || error.status !== 409) throw error; continue; }
           }
         }
         const code = roomCode();
-        const result = await db.prepare("INSERT OR IGNORE INTO chess_rooms (code, visibility, status, white_key, black_key, white_name, black_name, moves, fen, version, time_control, white_ms, black_ms, turn_started_at, white_seen, black_seen, draw_offer, outcome, created_at, updated_at, cheat_mode) VALUES (?, ?, 'waiting', ?, ?, ?, ?, '[]', ?, 0, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?)")
+        const result = await db.prepare("INSERT OR IGNORE INTO chess_rooms (code, visibility, status, white_key, black_key, white_name, black_name, moves, fen, version, time_control, white_ms, black_ms, turn_started_at, white_seen, black_seen, draw_offer, outcome, created_at, updated_at, cheat_mode, direct_takebacks) VALUES (?, ?, 'waiting', ?, ?, ?, ?, '[]', ?, 0, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, ?, ?)")
           .bind(code, path[0] === 'match' ? 'public' : 'private', seat === 'w' ? key : null, seat === 'b' ? key : null,
-            seat === 'w' ? name : 'Opponent', seat === 'b' ? name : 'Opponent', new Chess().fen(), minutes, minutes * 60_000, minutes * 60_000, seat === 'w' ? now : 0, seat === 'b' ? now : 0, now, now, cheatMode).run();
+            seat === 'w' ? name : 'Opponent', seat === 'b' ? name : 'Opponent', new Chess().fen(), minutes, minutes * 60_000, minutes * 60_000, seat === 'w' ? now : 0, seat === 'b' ? now : 0, now, now, cheatMode, directTakebacks).run();
         if (result.meta.changes) return reply(snapshot(await readRoom(db, code), seat, now), 201);
       }
       throw new RoomError('Could not create a room. Please try again.', 503);
@@ -156,7 +160,7 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
     let room = await readRoom(db, path[1]);
     if (request.method === 'GET' && path[2] === 'preview') {
       room = await settleRoom(db, room, now);
-      return reply({ code: room.code, cheatMode: room.cheat_mode === 1, timeControl: room.time_control, status: room.status });
+      return reply({ code: room.code, cheatMode: room.cheat_mode === 1, directTakebacks: room.cheat_mode === 1 && room.direct_takebacks === 1, timeControl: room.time_control, status: room.status });
     }
     if (request.method === 'POST' && path[2] === 'join') {
       if (!seatFor(room, key) && room.cheat_mode === 1 && body.acceptCheatMode !== true) throw new RoomError('Cheat mode is on in this room. Review the room settings before joining.', 409);
@@ -184,20 +188,37 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
       if (moves.length >= 1200) throw new RoomError('This game has reached its move limit.');
       moves.push(move.from + move.to + (move.promotion || ''));
       const result = gameOutcome(chess), clocks = clocksAt(room, now);
-      const changed = await db.prepare('UPDATE chess_rooms SET moves = ?, fen = ?, status = ?, outcome = ?, white_ms = ?, black_ms = ?, turn_started_at = ?, draw_offer = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = \'active\'')
+      const changed = await db.prepare('UPDATE chess_rooms SET moves = ?, fen = ?, status = ?, outcome = ?, white_ms = ?, black_ms = ?, turn_started_at = ?, draw_offer = ?, takeback_offer = NULL, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = \'active\'')
         .bind(JSON.stringify(moves), chess.fen(), result ? 'finished' : 'active', result, clocks.w, clocks.b, now, room.draw_offer === opposite(seat) ? null : room.draw_offer, now, room.code, room.version).run();
       if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
     } else if (path[2] === 'action') {
-      if (body.action === 'takeback') {
+      if (['takeback', 'accept-takeback', 'decline-takeback', 'cancel-takeback'].includes(String(body.action))) {
         if (!room.cheat_mode) throw new RoomError('Takebacks are only available in cheat-mode rooms.', 403);
         if (room.status !== 'active') throw new RoomError('Takebacks are available while the game is in progress.', 409);
+        if (body.action !== 'takeback') {
+          const expected = body.action === 'cancel-takeback' ? seat : opposite(seat);
+          if (room.takeback_offer !== expected) throw new RoomError('There is no takeback request for you to respond to.', 409);
+          if (body.action !== 'accept-takeback') {
+            const changed = await db.prepare("UPDATE chess_rooms SET takeback_offer = NULL, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'active'")
+              .bind(now, room.code, room.version).run();
+            if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
+            return reply(snapshot(await readRoom(db, room.code), seat, now));
+          }
+        } else if (room.takeback_offer) throw new RoomError('Respond to the existing takeback request first.', 409);
         const chess = new Chess(), moves: string[] = JSON.parse(room.moves);
         for (const move of moves) if (!makeUci(chess, move)) throw new Error('Invalid saved game');
-        const lastOwnMove = chess.history({ verbose: true }).findLastIndex(move => move.color === seat);
+        const requester = body.action === 'accept-takeback' ? room.takeback_offer! : seat;
+        const lastOwnMove = chess.history({ verbose: true }).findLastIndex(move => move.color === requester);
         if (lastOwnMove < 0) throw new RoomError('Make a move before taking one back.', 409);
+        if (body.action === 'takeback' && !room.direct_takebacks) {
+          const changed = await db.prepare("UPDATE chess_rooms SET takeback_offer = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'active'")
+            .bind(seat, now, room.code, room.version).run();
+          if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
+          return reply(snapshot(await readRoom(db, room.code), seat, now));
+        }
         while (moves.length > lastOwnMove) { moves.pop(); chess.undo(); }
         const clocks = clocksAt(room, now);
-        const changed = await db.prepare("UPDATE chess_rooms SET moves = ?, fen = ?, draw_offer = NULL, white_ms = ?, black_ms = ?, turn_started_at = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'active'")
+        const changed = await db.prepare("UPDATE chess_rooms SET moves = ?, fen = ?, draw_offer = NULL, takeback_offer = NULL, white_ms = ?, black_ms = ?, turn_started_at = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'active'")
           .bind(JSON.stringify(moves), chess.fen(), clocks.w, clocks.b, room.turn_started_at === null ? null : now, now, room.code, room.version).run();
         if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
         return reply(snapshot(await readRoom(db, room.code), seat, now));
@@ -209,7 +230,7 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
           if (room.rematch_offer !== opposite(seat)) throw new RoomError('There is no rematch request to respond to.', 409);
         } else if (room.rematch_offer) throw new RoomError('Your rematch request is already waiting.', 409);
         const changed = accepting
-          ? await db.prepare("UPDATE chess_rooms SET white_key = black_key, black_key = white_key, white_name = black_name, black_name = white_name, white_seen = black_seen, black_seen = white_seen, moves = '[]', fen = ?, status = 'active', outcome = NULL, draw_offer = NULL, rematch_offer = NULL, white_ms = ?, black_ms = ?, turn_started_at = NULL, round = round + 1, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'finished'")
+          ? await db.prepare("UPDATE chess_rooms SET white_key = black_key, black_key = white_key, white_name = black_name, black_name = white_name, white_seen = black_seen, black_seen = white_seen, moves = '[]', fen = ?, status = 'active', outcome = NULL, draw_offer = NULL, takeback_offer = NULL, rematch_offer = NULL, white_ms = ?, black_ms = ?, turn_started_at = NULL, round = round + 1, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'finished'")
             .bind(new Chess().fen(), room.time_control * 60_000, room.time_control * 60_000, now, room.code, room.version).run()
           : await db.prepare("UPDATE chess_rooms SET rematch_offer = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ? AND status = 'finished'")
             .bind(body.action === 'decline-rematch' ? null : seat, now, room.code, room.version).run();
@@ -227,8 +248,8 @@ export async function handleOnlineRequest(request: Request, db?: RoomDatabase): 
         default: throw new RoomError('Unknown game action.');
       }
       const clocks = clocksAt(room, now);
-      const changed = await db.prepare('UPDATE chess_rooms SET status = ?, outcome = ?, draw_offer = ?, white_ms = ?, black_ms = ?, turn_started_at = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ?')
-        .bind(status, outcome, offer, clocks.w, clocks.b, room.turn_started_at === null ? null : now, now, room.code, room.version).run();
+      const changed = await db.prepare('UPDATE chess_rooms SET status = ?, outcome = ?, draw_offer = ?, takeback_offer = ?, white_ms = ?, black_ms = ?, turn_started_at = ?, version = version + 1, updated_at = ? WHERE code = ? AND version = ?')
+        .bind(status, outcome, offer, status === 'active' ? room.takeback_offer : null, clocks.w, clocks.b, room.turn_started_at === null ? null : now, now, room.code, room.version).run();
       if (!changed.meta.changes) throw new RoomError('The game has changed. Please try again.', 409);
     } else throw new RoomError('Not found.', 404);
     room = await readRoom(db, room.code);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent } from 'react';
+import type { CSSProperties } from 'react';
 import { Chess } from 'chess.js';
 import type { Color, PieceSymbol, Square } from 'chess.js';
 import { ArrowDownUp, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, BookOpen, Check, ChevronDown, ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, CircleHelp, Clock3, Cpu, Download, Flag, Gamepad2, Heart, History, Lightbulb, LoaderCircle, Menu, MoreHorizontal, Play, RotateCcw, Settings2, ShieldCheck, Sparkles, Swords, Target, Trophy, Upload, Users, Volume2, VolumeX, X } from 'lucide-react';
@@ -12,6 +12,10 @@ import { OnlinePanel } from './OnlinePanel';
 import { BoardConfetti, GameResult, presentResult } from './GameResult';
 import { explainIllegalMove, isCastleAttempt } from './move-rules';
 import { MoveRuleNotice } from './MoveRuleNotice';
+import { TakebackRequest } from './TakebackRequest';
+import { usePieceDrag } from './use-piece-drag';
+import { premoveTargets } from './premoves';
+import type { Premove } from './premoves';
 
 type Mode = 'bot' | 'local' | 'analysis' | 'online';
 type DialogType = 'new' | 'import' | 'settings' | 'help' | 'resign' | 'games' | null;
@@ -52,7 +56,10 @@ function App() {
   const [outcome, setOutcome] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogType>(null);
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
-  const [promotion, setPromotion] = useState<{ from: Square; to: Square } | null>(null);
+  const [promotion, setPromotion] = useState<{ from: Square; to: Square; premove?: boolean } | null>(null);
+  const [premove, setPremove] = useState<Premove | null>(null);
+  const premoveRef = useRef<Premove | null>(null);
+  const cancelPremove = useCallback(() => { premoveRef.current = null; setPremove(null); }, []);
   const [input, setInput] = useState('');
   const [inputError, setInputError] = useState('');
   const [sound, setSound] = useState(true);
@@ -98,6 +105,7 @@ function App() {
     const room = move && move.code === confirmed.code && move.round === confirmed.round && move.version === confirmed.version
       ? { ...confirmed, fen: move.fen, moves: move.moves } : confirmed;
     const newRoom = syncedOnline.current.code !== room.code || syncedOnline.current.round !== room.round;
+    if (newRoom || room.moves.length < recordsRef.current.length) cancelPremove();
     const sameMoves = room.moves.length === recordsRef.current.length && room.moves.every((move, index) => recordsRef.current[index].uci === move);
     if (!newRoom && sameMoves && game.current.fen() === room.fen && outcomeRef.current === room.outcome) {
       syncedOnline.current = { code: room.code, version: room.version, round: room.round }; return;
@@ -270,13 +278,13 @@ function App() {
       if (online.pending || online.connection !== 'connected' || online.room?.status !== 'active' || game.current.turn() !== side) return;
       const possible = game.current.moves({ square: from, verbose: true }).find(move => move.to === to && (!move.promotion || move.promotion === piece));
       if (!possible) { explainAttempt(from, to); return; }
-      setMoveRule(null); setPromotion(null); setSelected(null); await online.move(uci(possible)); return;
+      cancelPremove(); setMoveRule(null); setPromotion(null); setSelected(null); await online.move(uci(possible)); return;
     }
     const before = game.current.fen();
     let move;
     try { move = game.current.move({ from, to, promotion: piece }); } catch { explainAttempt(from, to); return; }
     const record: MoveRecord = { san: move.san, uci: uci(move), before, after: game.current.fen(), color: move.color };
-    setMoveRule(null); setSelected(null); setHint(null); setPromotion(null); setRecords(prev => [...prev, record]); setFen(record.after); playSound(move.isCapture());
+    cancelPremove(); setMoveRule(null); setSelected(null); setHint(null); setPromotion(null); setRecords(prev => [...prev, record]); setFen(record.after); playSound(move.isCapture());
     const end = gameOutcome(game.current); if (end) setOutcome(end);
     if (engineStatus !== 'ready') return;
     const token = generation.current; setBusy(true);
@@ -289,6 +297,13 @@ function App() {
   };
 
   const tryMove = (from: Square, to: Square) => {
+    if (canPremove) {
+      if (from === to) { setSelected(null); return; }
+      if (!premoveTargets(position, from, side).includes(to)) { setMoveRule({ from, to, message: 'That isn’t a possible premove for this piece. Choose a marked square, or press Escape to cancel.' }); return; }
+      if (position.get(from)?.type === 'p' && (to[1] === '1' || to[1] === '8')) setPromotion({ from, to, premove: true });
+      else queuePremove(from, to);
+      return;
+    }
     if (!isPlayable) { explainUnavailable(from); return; }
     if (from === to) { setSelected(null); setMoveRule(null); return; }
     const possible = game.current.moves({ square: from, verbose: true }).filter(m => m.to === to);
@@ -301,14 +316,36 @@ function App() {
   const boardFen = reviewIndex === null ? fen : reviewIndex === 0 ? initialFen : records[reviewIndex - 1]?.after || fen;
   const position = new Chess(boardFen);
   const isPlayable = !busy && !reviewing && !outcome && reviewIndex === null && (mode !== 'bot' || (position.turn() === side && engineStatus === 'ready')) && (mode !== 'online' || (online.room?.status === 'active' && online.connection === 'connected' && !online.pending && position.turn() === side));
+  const canPremove = !outcome && !reviewing && reviewIndex === null && !dialog && !promotion && position.turn() !== side && (mode === 'bot' && engineStatus === 'ready' || mode === 'online' && online.room?.status === 'active' && online.connection === 'connected' && (!online.pending || !!online.pendingMove));
+  const inputColor = canPremove ? side : position.turn();
   const legalMoves = selected && isPlayable ? position.moves({ square: selected, verbose: true }) : [];
+  const premoveSquares = selected && canPremove ? premoveTargets(position, selected, side) : [];
   const shownRecord = reviewIndex === null ? records.at(-1) : records[reviewIndex - 1];
   const coachRecord = reviewIndex === null && (mode === 'bot' || onlineCheats) ? [...records].reverse().find(r => r.color === side) : shownRecord;
   const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !reviewing && engineStatus === 'ready' && onlineAnalysisAllowed);
   const shownEval = liveAnalysis.evaluation || evaluations.current.get(boardFen) || shownRecord?.evaluation;
   const shownLast = shownRecord?.uci;
-  const onlineHintUnavailable = mode === 'online' && (!onlineCheats || !onlineInProgress || position.turn() !== side || reviewIndex !== null || online.pending || online.connection !== 'connected');
-  const onlineTakebackAvailable = onlineCheats && onlineInProgress && records.some(record => record.color === side) && !online.pending && online.connection === 'connected';
+  const onlineHintUnavailable = mode === 'online';
+  const onlineTakebackAvailable = onlineCheats && onlineInProgress && !online.room?.takebackOffer && records.some(record => record.color === side) && !online.pending && online.connection === 'connected';
+
+  const queuePremove = (from: Square, to: Square, promotion: PieceSymbol = 'q') => {
+    const move = { from, to, promotion, ply: recordsRef.current.length, color: side };
+    premoveRef.current = move; setPremove(move); setSelected(null); setPromotion(null); setMoveRule(null); setHint(null);
+  };
+  useEffect(() => {
+    if (!premove || premoveRef.current !== premove) return;
+    if (outcome || reviewIndex !== null || !['online', 'bot'].includes(mode) || online.connection !== 'connected' || premove.color !== side || recordsRef.current.length < premove.ply || recordsRef.current.length > premove.ply + 1) { cancelPremove(); return; }
+    if (game.current.turn() !== side || busy || reviewing || dialog || online.pending) return;
+    // Wait for the rendered position to catch up with the shared game ref.
+    // Otherwise the position-change effect can erase cancellation feedback.
+    if (fen !== game.current.fen()) return;
+    if (mode === 'online' && (online.room?.status !== 'active' || online.room.fen !== game.current.fen())) return;
+    if (mode === 'bot' && engineStatus !== 'ready') return;
+    cancelPremove();
+    const legal = game.current.moves({ square: premove.from, verbose: true }).some(move => move.to === premove.to && (!move.promotion || move.promotion === premove.promotion));
+    if (legal) void commitMove(premove.from, premove.to, premove.promotion);
+    else setMoveRule({ from: premove.from, to: premove.to, message: `Premove canceled. ${explainIllegalMove(game.current, premove.from, premove.to) || 'The position has changed.'}` });
+  }, [premove, fen, mode, side, busy, reviewing, reviewIndex, outcome, online.room, online.pending, online.connection, engineStatus, dialog]);
 
   const explainUnavailable = (square: Square) => {
     if (outcome && mode !== 'analysis') return;
@@ -326,17 +363,21 @@ function App() {
   };
 
   const onSquare = (square: Square) => {
-    if (!isPlayable) { explainUnavailable(square); return; }
+    if (!isPlayable && !canPremove) { explainUnavailable(square); return; }
     const piece = position.get(square);
     // Clicking another friendly piece normally changes selection. A two-square
     // king move is an attempted castle, even if a friendly piece blocks it.
-    if (selected && selected !== square && (!piece || piece.color !== position.turn() || isCastleAttempt(position, selected, square))) { tryMove(selected, square); return; }
-    if (piece && piece.color === position.turn()) { setMoveRule(null); setSelected(selected === square ? null : square); }
+    if (selected && selected !== square && (!piece || piece.color !== inputColor || isCastleAttempt(position, selected, square))) { tryMove(selected, square); return; }
+    if (piece && piece.color === inputColor) { cancelPremove(); setMoveRule(null); setSelected(selected === square ? null : square); }
     else if (piece) explainAttempt(square, square);
     else { setSelected(null); setMoveRule(null); }
   };
 
+  const drag = usePieceDrag({ positionKey: `${fen}:${mode}:${side}:${flipped}:${reviewIndex}:${outcome}:${online.connection}:${online.room?.code}:${online.room?.round}`,
+    onSelect: square => { cancelPremove(); setMoveRule(null); setSelected(square); }, onDrop: tryMove });
+
   const beginGame = async (newMode: Mode = mode, sameOpponent = false) => {
+    cancelPremove();
     if (online.room && ['active', 'waiting'].includes(online.room.status)) {
       if (online.room.status === 'active') { setDialog('resign'); return; }
       if (!await online.action('cancel')) return;
@@ -357,6 +398,7 @@ function App() {
 
   const takeback = () => {
     if (!records.length || reviewing) return;
+    cancelPremove();
     if (mode === 'online') {
       if (!onlineTakebackAvailable) return;
       setSelected(null); setHint(null); setReviewIndex(null); void online.action('takeback'); return;
@@ -390,6 +432,7 @@ function App() {
   const switchPlayMode = (nextMode: Mode) => { setMobileNav(false); if (mode === nextMode) return; if (onlineInProgress) { setDialog('resign'); return; } if (records.length) { setPendingMode(nextMode); setDialog('new'); } else void beginGame(nextMode); };
 
   const leaveOnline = async () => {
+    cancelPremove();
     if (online.room?.status === 'active') { setDialog('resign'); return; }
     if (online.room?.status === 'waiting' && !await online.action('cancel')) return;
     online.forget(); syncedOnline.current = { code: '', version: -1, round: 0 };
@@ -399,6 +442,7 @@ function App() {
   };
 
   const resignGame = async () => {
+    cancelPremove();
     if (mode === 'online') { if (await online.action('resign')) setDialog(null); return; }
     generation.current++; setBusy(false); setOutcome(`${mode === 'bot' ? side === 'w' ? 'Black' : 'White' : game.current.turn() === 'w' ? 'Black' : 'White'} wins by resignation`); setDialog(null);
   };
@@ -425,6 +469,7 @@ function App() {
   };
 
   const loadPosition = (text: string) => {
+    cancelPremove();
     if (onlineInProgress || online.room?.status === 'waiting') { notify('Finish or leave your online room before importing a game.'); return; }
     try {
       const c = new Chess(); let start = START_FEN;
@@ -437,13 +482,13 @@ function App() {
     } catch (error) { setInputError(error instanceof Error ? error.message : 'That PGN or FEN could not be read.'); }
   };
 
-  const navigateReview = useCallback((index: number | null) => { setReviewIndex(index); setSelected(null); setHint(null); }, []);
+  const navigateReview = useCallback((index: number | null) => { cancelPremove(); setReviewIndex(index); setSelected(null); setHint(null); }, [cancelPremove]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (dialog || promotion || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
       if (event.key === 'ArrowLeft') { event.preventDefault(); navigateReview(Math.max(0, (reviewIndex ?? records.length) - 1)); }
       if (event.key === 'ArrowRight') { event.preventDefault(); const next = (reviewIndex ?? records.length) + 1; navigateReview(next >= records.length ? null : next); }
-      if (event.key === 'Escape') { setSelected(null); setHint(null); setMoveRule(null); }
+      if (event.key === 'Escape') { cancelPremove(); drag.cancel(); setSelected(null); setHint(null); setMoveRule(null); }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   }, [dialog, promotion, reviewIndex, records.length, navigateReview]);
@@ -484,6 +529,7 @@ function App() {
   };
 
   return <div className={`app-shell theme-${boardTheme} ${mode === 'online' ? 'online-mode' : ''} ${mode === 'online' && (!online.room || online.room.status === 'waiting') ? 'online-lobby' : ''}`}>
+    {drag.piece && <img ref={drag.imageRef} className="drag-piece" src={drag.piece.image} alt="" aria-hidden="true" draggable={false} style={{ left: drag.piece.x, top: drag.piece.y, width: drag.piece.size, height: drag.piece.size }} />}
     {mobileNav && <div className="nav-scrim" onClick={() => setMobileNav(false)} />}
     <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
       <a className="brand" href="/" aria-label="Knight Club home"><KnightMark /><span>knight<span className="brand-light">club</span><i /></span></a>
@@ -514,7 +560,7 @@ function App() {
             {renderPlayer(topColor)}
             <div className="board-wrap">
               {onlineAnalysisAllowed && <div className="evaluation-bar" aria-label={`Evaluation ${evalText(shownEval)} from White’s perspective`}><div className="eval-black" /><div className="eval-white" style={{ height: `${whitePercent}%`, top: flipped ? 0 : 'auto', bottom: flipped ? 'auto' : 0 }} /><span className={`eval-number ${(shownEval?.cp || 0) > 0 ? 'positive' : ''}`} style={{ top: flipped ? 6 : 'auto', bottom: flipped ? 'auto' : 6 }}>{evalText(shownEval)}</span></div>}
-              <div className="board" role="group" aria-label="Chessboard">
+              <div className={`board ${drag.piece ? 'is-dragging' : ''}`} role="group" aria-label="Chessboard" onClickCapture={event => { if (drag.suppressClick.current) { event.preventDefault(); event.stopPropagation(); } }} onContextMenu={event => { event.preventDefault(); cancelPremove(); drag.cancel(); setSelected(null); }}>
                 {Array.from({ length: 64 }, (_, index) => {
                   const row = Math.floor(index / 8), col = index % 8;
                   const file = flipped ? 7 - col : col, rank = flipped ? row + 1 : 8 - row;
@@ -524,30 +570,29 @@ function App() {
                   const lastMove = shownLast && [shownLast.slice(0, 2), shownLast.slice(2, 4)].includes(square);
                   const isHint = hint && [hint.slice(0, 2), hint.slice(2, 4)].includes(square);
                   const inCheck = piece?.type === 'k' && piece.color === position.turn() && position.isCheck();
-                  const onDragStart = (event: DragEvent<HTMLButtonElement>) => {
-                    if (!isPlayable || !piece || piece.color !== position.turn()) { event.preventDefault(); return; }
-                    const image = event.currentTarget.querySelector<HTMLImageElement>('.piece');
-                    if (!image) { event.preventDefault(); return; }
-                    // Native dragging otherwise snapshots the entire square,
-                    // including its background, coordinates, and highlights.
-                    event.dataTransfer.setDragImage(image, image.width / 2, image.height / 2);
-                    event.dataTransfer.setData('text/plain', square);
-                    event.dataTransfer.effectAllowed = 'move';
-                    setMoveRule(null); setSelected(square);
-                  };
-                  return <button key={square} type="button" className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastMove ? 'last-move' : ''} ${isHint ? 'hint-square' : ''} ${inCheck ? 'check-square' : ''} ${moveRule?.to === square ? 'invalid-square' : ''}`} aria-label={`${square}${piece ? ` ${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}` : ''}${legal ? ' legal destination' : ''}`} aria-describedby={moveRule && (moveRule.from === square || moveRule.to === square) ? 'move-rule-explanation' : undefined} aria-pressed={selected === square} onClick={() => onSquare(square)} draggable={!!piece && isPlayable && piece.color === position.turn()} onDragStart={onDragStart} onDragOver={event => { if (isPlayable) event.preventDefault(); }} onDrop={event => { event.preventDefault(); const source = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(source)) tryMove(source as Square, square); }}>
+                  const movable = !!piece && (isPlayable || canPremove) && piece.color === inputColor;
+                  const target = legal || premoveSquares.includes(square);
+                  return <button key={square} type="button" data-square={square} data-movable={movable || undefined} draggable={false}
+                    className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastMove ? 'last-move' : ''} ${isHint ? 'hint-square' : ''} ${inCheck ? 'check-square' : ''} ${moveRule?.to === square ? 'invalid-square' : ''} ${premove && [premove.from, premove.to].includes(square) ? 'premove-square' : ''} ${drag.piece?.from === square ? 'drag-source' : ''} ${drag.piece?.over === square ? 'drag-over' : ''}`}
+                    aria-label={`${square}${piece ? ` ${piece.color === 'w' ? 'white' : 'black'} ${pieceNames[piece.type]}` : ''}${target ? canPremove ? ' premove destination' : ' legal destination' : ''}`}
+                    aria-describedby={moveRule && (moveRule.from === square || moveRule.to === square) ? 'move-rule-explanation' : undefined}
+                    aria-pressed={selected === square} onClick={() => onSquare(square)}
+                    onDragStart={event => event.preventDefault()}
+                    onPointerDown={event => { if (movable && piece) drag.start(event, square, `/pieces/${piece.color}${piece.type.toUpperCase()}.svg`); }}>
                     {col === 0 && <span className="coordinate rank">{rank}</span>}{row === 7 && <span className="coordinate file">{'abcdefgh'[file]}</span>}
                     {piece && <img className="piece" src={`/pieces/${piece.color}${piece.type.toUpperCase()}.svg`} alt="" draggable={false} />}
-                    {showLegal && legal && <span className={piece ? 'legal-capture' : 'legal-dot'} />}
+                    {showLegal && target && <span className={`${piece ? 'legal-capture' : 'legal-dot'} ${canPremove ? 'premove-dot' : ''}`} />}
                     {shownRecord?.quality && square === shownLast?.slice(2, 4) && tab === 'analysis' && <span className={`board-quality quality-${shownRecord.quality.toLowerCase()}`}>{QUALITY_SYMBOL[shownRecord.quality]}</span>}
                   </button>;
                 })}
                 {result?.kind === 'win' && reviewIndex === null && <BoardConfetti key={resultGameId} gameId={resultGameId} />}
-                {promotion && <div className="promotion-backdrop"><div className="promotion-picker" role="dialog" aria-label="Choose a promotion piece"><span>Promote your pawn</span><div>{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(p => <button key={p} aria-label={`Promote to ${pieceNames[p]}`} onClick={() => void commitMove(promotion.from, promotion.to, p)}><img src={`/pieces/${game.current.turn()}${p.toUpperCase()}.svg`} alt={pieceNames[p]} /></button>)}</div><button className="text-button" onClick={() => setPromotion(null)}>Cancel</button></div></div>}
+                {promotion && <div className="promotion-backdrop"><div className="promotion-picker" role="dialog" aria-label="Choose a promotion piece"><span>Promote your pawn</span><div>{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(p => <button key={p} aria-label={`Promote to ${pieceNames[p]}`} onClick={() => promotion.premove ? queuePremove(promotion.from, promotion.to, p) : void commitMove(promotion.from, promotion.to, p)}><img src={`/pieces/${promotion.premove ? side : game.current.turn()}${p.toUpperCase()}.svg`} alt={pieceNames[p]} /></button>)}</div><button className="text-button" onClick={() => setPromotion(null)}>Cancel</button></div></div>}
               </div>
             </div>
             {renderPlayer(bottomColor)}
-            <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || (mode === 'online' && !onlineTakebackAvailable)} title={onlineCheats ? 'Undo your last move and any reply on both boards' : undefined} onClick={takeback}><RotateCcw size={17} /><span>Take back</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || onlineHintUnavailable} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
+            {premove && <div className="premove-notice" role="status"><span><strong>Premove queued</strong> {premove.from}<ArrowRight size={12} />{premove.to}{premove.promotion !== 'q' && <span> · {pieceNames[premove.promotion]}</span>}<small>Plays on your turn if legal</small></span><button className="text-button" aria-label="Cancel premove" onClick={cancelPremove}>Cancel<X size={14} /></button></div>}
+            {mode === 'online' && online.room?.takebackOffer && online.room.status === 'active' && <TakebackRequest online={online} />}
+            <div className="board-toolbar"><div><button className="toolbar-button" disabled={!records.length || reviewing || (mode === 'online' && !onlineTakebackAvailable)} title={onlineCheats ? online.room?.directTakebacks ? 'Undo your last move and any reply on both boards' : 'Ask your opponent to undo your last move and any reply' : undefined} onClick={takeback}><RotateCcw size={17} /><span>{onlineCheats && !online.room?.directTakebacks ? 'Request takeback' : 'Take back'}</span></button><button className="toolbar-button" disabled={busy || reviewing || !!outcome || engineStatus !== 'ready' || onlineHintUnavailable} onClick={() => void requestHint()}><Lightbulb size={17} /><span>Hint</span></button></div><div><button className="icon-button" title="Flip board" aria-label="Flip board" onClick={() => setFlipped(v => !v)}><ArrowDownUp size={17} /></button><button className="icon-button" title={sound ? 'Mute sound' : 'Enable sound'} aria-label={sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSound(v => !v)}>{sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button><button className="icon-button" title="Export PGN" aria-label="Export PGN" onClick={exportPgn}><Download size={18} /></button><span className="toolbar-divider" /><button className="icon-button" title="Resign game" aria-label="Resign game" disabled={!!outcome || mode === 'analysis' || (mode === 'online' ? online.room?.status !== 'active' : !records.length)} onClick={() => setDialog('resign')}><Flag size={17} /></button></div></div>
             {result && outcome ? <GameResult key={resultGameId} result={result} outcome={outcome} color={side} pending={online.pending || (mode === 'bot' && engineStatus !== 'ready')} reviewDisabled={!records.length || busy || reviewing || engineStatus !== 'ready'} rematch={rematch} opponent={online.room?.players[side === 'w' ? 'b' : 'w'] || 'your opponent'} onPlayAgain={playAgain} onReview={() => void reviewGame()} onDecline={() => void online.action('decline-rematch')} /> : moveRule ? <MoveRuleNotice {...moveRule} onDismiss={() => setMoveRule(null)} /> : mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? <div className="online-board-note"><ShieldCheck size={20} /><div><strong>{online.room?.status === 'active' ? 'A fair game. Just the two of you.' : 'Your next opponent is a link away.'}</strong><p>{online.room?.status === 'active' ? 'Engine hints and takebacks are off. Review the game together afterward.' : 'Open Play online to create a room or join a friend.'}</p></div></div> : <div className={`coach-message ${coachRecord?.quality ? `coach-${coachRecord.quality.toLowerCase()}` : ''}`} aria-live="polite"><div className="coach-icon">{coachRecord?.quality ? <span>{QUALITY_SYMBOL[coachRecord.quality]}</span> : <Lightbulb size={21} />}</div><div><strong>{outcome || (coach && coachRecord ? `${coachRecord.san} · ${coachRecord.quality || 'Taking a closer look'}` : 'Every move has a little lesson in it.')}</strong><p>{outcome ? 'Explore the analysis to see where the game turned.' : coach && coachRecord ? explainMove(coachRecord) : 'Play a move. Your free personal coach will take it from there.'}</p></div>{outcome && <button className="text-button" onClick={() => void reviewGame()}>Review <ArrowRight size={16} /></button>}</div>}
           </section>
 
