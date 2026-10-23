@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Chess } from 'chess.js';
 import type { Color, PieceSymbol, Square } from 'chess.js';
@@ -18,6 +18,7 @@ import { premoveTargets } from './premoves';
 import type { Premove } from './premoves';
 
 type Mode = 'bot' | 'local' | 'analysis' | 'online';
+const PuzzleHub = lazy(() => import('./PuzzleHub'));
 type DialogType = 'new' | 'import' | 'settings' | 'help' | 'resign' | 'games' | null;
 interface SavedGame { id: string; date: string; bot: string; pgn: string; result: string; moves: number }
 const pieceNames: Record<PieceSymbol, string> = { k: 'king', q: 'queen', r: 'rook', b: 'bishop', n: 'knight', p: 'pawn' };
@@ -39,6 +40,7 @@ function App() {
   const [bot, setBot] = useState<Bot>(BOTS[1]);
   const [selectedBot, setSelectedBot] = useState<Bot>(BOTS[1]);
   const [mode, setMode] = useState<Mode>('bot');
+  const [puzzlesOpen, setPuzzlesOpen] = useState(false);
   const [side, setSide] = useState<Color>('w');
   const [chosenSide, setChosenSide] = useState<'w' | 'b' | 'random'>('w');
   const [flipped, setFlipped] = useState(false);
@@ -93,8 +95,9 @@ function App() {
 
   useEffect(() => {
     if (new URLSearchParams(location.search).has('join')) { setMode('online'); setTab('game'); }
+    else if (new URLSearchParams(location.search).get('view') === 'puzzles' || new URLSearchParams(location.search).has('puzzle')) setPuzzlesOpen(true);
   }, []);
-  useEffect(() => { if (online.restoring) { setMode('online'); setTab('game'); } }, [online.restoring]);
+  useEffect(() => { if (online.restoring) { setMode('online'); setTab('game'); setPuzzlesOpen(false); } }, [online.restoring]);
 
   useEffect(() => {
     const confirmed = online.room;
@@ -163,7 +166,7 @@ function App() {
   useEffect(() => { if (moveListRef.current && reviewIndex === null) moveListRef.current.scrollTop = moveListRef.current.scrollHeight; }, [records.length, reviewIndex]);
 
   useEffect(() => {
-    if (!activeTimeControl || mode === 'analysis' || mode === 'online' || !gameStarted || outcome) return;
+    if (puzzlesOpen || !activeTimeControl || mode === 'analysis' || mode === 'online' || !gameStarted || outcome) return;
     let last = performance.now();
     const timer = setInterval(() => {
       const now = performance.now(), elapsed = now - last; last = now;
@@ -171,12 +174,12 @@ function App() {
       setClocks(prev => ({ ...prev, [turn]: Math.max(0, prev[turn] - elapsed) }));
     }, 200);
     return () => clearInterval(timer);
-  }, [activeTimeControl, mode, gameStarted, outcome]);
+  }, [activeTimeControl, mode, gameStarted, outcome, puzzlesOpen]);
 
   useEffect(() => {
-    if (!activeTimeControl || mode === 'analysis' || mode === 'online' || outcome) return;
+    if (puzzlesOpen || !activeTimeControl || mode === 'analysis' || mode === 'online' || outcome) return;
     if (clocks.w <= 0 || clocks.b <= 0) { generation.current++; setBusy(false); setOutcome(`${clocks.w <= 0 ? 'Black' : 'White'} wins on time`); }
-  }, [clocks, activeTimeControl, mode, outcome]);
+  }, [clocks, activeTimeControl, mode, outcome, puzzlesOpen]);
 
   useEffect(() => {
     if (!outcome || !records.length || savedId.current) return;
@@ -261,11 +264,11 @@ function App() {
   };
 
   useEffect(() => {
-    if (engineStatus !== 'ready' || mode !== 'bot' || busy || reviewing || outcome || game.current.turn() === side) return;
+    if (puzzlesOpen || engineStatus !== 'ready' || mode !== 'bot' || busy || reviewing || outcome || game.current.turn() === side) return;
     const token = generation.current;
     setBusy(true);
     void computerMove(token, bot).catch(error => { if (token === generation.current) handleEngineError(error); }).finally(() => { if (token === generation.current) setBusy(false); });
-  }, [engineStatus, mode, busy, reviewing, outcome, fen, side]);
+  }, [engineStatus, mode, busy, reviewing, outcome, fen, side, puzzlesOpen]);
 
   const explainAttempt = (from: Square, to: Square) => {
     const message = explainIllegalMove(game.current, from, to);
@@ -322,7 +325,7 @@ function App() {
   const premoveSquares = selected && canPremove ? premoveTargets(position, selected, side) : [];
   const shownRecord = reviewIndex === null ? records.at(-1) : records[reviewIndex - 1];
   const coachRecord = reviewIndex === null && (mode === 'bot' || onlineCheats) ? [...records].reverse().find(r => r.color === side) : shownRecord;
-  const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !reviewing && engineStatus === 'ready' && onlineAnalysisAllowed);
+  const liveAnalysis = useLiveAnalysis(boardFen, engineRetry, !puzzlesOpen && !reviewing && engineStatus === 'ready' && onlineAnalysisAllowed);
   const shownEval = liveAnalysis.evaluation || evaluations.current.get(boardFen) || shownRecord?.evaluation;
   const shownLast = shownRecord?.uci;
   const onlineHintUnavailable = mode === 'online';
@@ -377,6 +380,7 @@ function App() {
     onSelect: square => { cancelPremove(); setMoveRule(null); setSelected(square); }, onDrop: tryMove });
 
   const beginGame = async (newMode: Mode = mode, sameOpponent = false) => {
+    setPuzzlesOpen(false);
     cancelPremove();
     if (online.room && ['active', 'waiting'].includes(online.room.status)) {
       if (online.room.status === 'active') { setDialog('resign'); return; }
@@ -428,8 +432,14 @@ function App() {
     finally { if (token === generation.current) setReviewing(false); }
   };
 
-  const enterAnalysis = () => { if (onlineCheats && online.room && ['waiting', 'active', 'finished'].includes(online.room.status)) { setTab('analysis'); setMobileNav(false); return; } if (onlineInProgress) { notify('Analysis is available after your online game.'); return; } if (online.room?.status === 'waiting') { notify('Cancel your room before opening analysis.'); return; } online.forget(); generation.current++; setBusy(false); setReviewing(false); setMode('analysis'); setTab('analysis'); setMobileNav(false); setSelected(null); };
-  const switchPlayMode = (nextMode: Mode) => { setMobileNav(false); if (mode === nextMode) return; if (onlineInProgress) { setDialog('resign'); return; } if (records.length) { setPendingMode(nextMode); setDialog('new'); } else void beginGame(nextMode); };
+  const enterAnalysis = () => { setPuzzlesOpen(false); if (onlineCheats && online.room && ['waiting', 'active', 'finished'].includes(online.room.status)) { setTab('analysis'); setMobileNav(false); return; } if (onlineInProgress) { notify('Analysis is available after your online game.'); return; } if (online.room?.status === 'waiting') { notify('Cancel your room before opening analysis.'); return; } online.forget(); generation.current++; setBusy(false); setReviewing(false); setMode('analysis'); setTab('analysis'); setMobileNav(false); setSelected(null); };
+  const switchPlayMode = (nextMode: Mode) => { setPuzzlesOpen(false); setMobileNav(false); if (mode === nextMode) return; if (onlineInProgress) { setDialog('resign'); return; } if (records.length) { setPendingMode(nextMode); setDialog('new'); } else void beginGame(nextMode); };
+  const enterPuzzles = () => {
+    setMobileNav(false);
+    if (online.pending || online.restoring) { notify('Wait for your online action to finish before opening puzzles.'); return; }
+    if (online.room && ['active', 'waiting'].includes(online.room.status)) { notify(online.room.status === 'active' ? 'Finish your online game before opening puzzles.' : 'Cancel your waiting room before opening puzzles.'); return; }
+    generation.current++; cancelPremove(); drag.cancel(); setBusy(false); setReviewing(false); setSelected(null); setPuzzlesOpen(true);
+  };
 
   const leaveOnline = async () => {
     cancelPremove();
@@ -478,20 +488,20 @@ function App() {
       const history = c.history({ verbose: true }).map(m => ({ san: m.san, uci: uci(m), before: m.before, after: m.after, color: m.color }));
       if (!text.trim()) throw new Error('Enter a PGN game or a FEN position.');
       generation.current++; game.current = c; setInitialFen(start); setFen(c.fen()); setRecords(history); setMode('analysis'); setTab('analysis'); setBusy(false); setReviewing(false); setReviewIndex(null); setSelected(null); setHint(null); setOutcome(gameOutcome(c)); setDialog(null); setInput(''); setInputError(''); savedId.current = 'imported';
-      notify('Game loaded. Run a review to analyze every move.');
+      setPuzzlesOpen(false); notify('Game loaded. Run a review to analyze every move.');
     } catch (error) { setInputError(error instanceof Error ? error.message : 'That PGN or FEN could not be read.'); }
   };
 
   const navigateReview = useCallback((index: number | null) => { cancelPremove(); setReviewIndex(index); setSelected(null); setHint(null); }, [cancelPremove]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (dialog || promotion || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
+      if (puzzlesOpen || dialog || promotion || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
       if (event.key === 'ArrowLeft') { event.preventDefault(); navigateReview(Math.max(0, (reviewIndex ?? records.length) - 1)); }
       if (event.key === 'ArrowRight') { event.preventDefault(); const next = (reviewIndex ?? records.length) + 1; navigateReview(next >= records.length ? null : next); }
       if (event.key === 'Escape') { cancelPremove(); drag.cancel(); setSelected(null); setHint(null); setMoveRule(null); }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, [dialog, promotion, reviewIndex, records.length, navigateReview]);
+  }, [dialog, promotion, reviewIndex, records.length, navigateReview, puzzlesOpen]);
 
   const analyzed = records.filter(r => r.quality);
   const accuracyFor = (color: Color) => {
@@ -535,10 +545,11 @@ function App() {
       <a className="brand" href="/" aria-label="Knight Club home"><KnightMark /><span>knight<span className="brand-light">club</span><i /></span></a>
       <div className="nav-section-label">A little better, every game.</div>
       <nav aria-label="Main navigation">
-        <button aria-label="Play chess" className={`nav-link ${mode === 'bot' || mode === 'local' ? 'active' : ''}`} onClick={() => switchPlayMode('bot')}><Swords size={21} /><span>Play chess</span><ChevronDown size={15} /></button>
-        <div className="subnav"><button className={mode === 'bot' ? 'active' : ''} onClick={() => switchPlayMode('bot')}>Play computer <span className="tiny-dot" /></button><button className={mode === 'local' ? 'active' : ''} onClick={() => switchPlayMode('local')}>Same device <Users size={14} /></button></div>
-        <button aria-label="Play online" title="Play online" className={`nav-link ${mode === 'online' ? 'active' : ''}`} onClick={() => switchPlayMode('online')}><Users size={21} /><span>Play online</span></button>
-        <button aria-label="Analysis board" className={`nav-link ${mode === 'analysis' ? 'active' : ''}`} onClick={enterAnalysis}><BarChart3 size={21} /><span>Analysis</span><span className="free-label">FREE</span></button>
+        <button aria-label="Play chess" className={`nav-link ${!puzzlesOpen && (mode === 'bot' || mode === 'local') ? 'active' : ''}`} onClick={() => switchPlayMode('bot')}><Swords size={21} /><span>Play chess</span><ChevronDown size={15} /></button>
+        <div className="subnav"><button className={!puzzlesOpen && mode === 'bot' ? 'active' : ''} onClick={() => switchPlayMode('bot')}>Play computer <span className="tiny-dot" /></button><button className={!puzzlesOpen && mode === 'local' ? 'active' : ''} onClick={() => switchPlayMode('local')}>Same device <Users size={14} /></button></div>
+        <button aria-label="Play online" title="Play online" className={`nav-link ${!puzzlesOpen && mode === 'online' ? 'active' : ''}`} onClick={() => switchPlayMode('online')}><Users size={21} /><span>Play online</span></button>
+        <button aria-label="Puzzles" className={`nav-link ${puzzlesOpen ? 'active' : ''}`} onClick={enterPuzzles}><Target size={21} /><span>Puzzles</span></button>
+        <button aria-label="Analysis board" className={`nav-link ${!puzzlesOpen && mode === 'analysis' ? 'active' : ''}`} onClick={enterAnalysis}><BarChart3 size={21} /><span>Analysis</span><span className="free-label">FREE</span></button>
         <button aria-label="My games" className="nav-link" onClick={() => { setDialog('games'); setMobileNav(false); }}><History size={21} /><span>My games</span></button>
       </nav>
       <div className="sidebar-bottom">
@@ -550,7 +561,8 @@ function App() {
     </aside>
 
     <main>
-      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={22} /></button><span>Play</span><ChevronRight size={14} /><strong>{mode === 'bot' ? 'Computer' : mode === 'local' ? 'Local game' : mode === 'online' ? 'Online game' : 'Analysis board'}</strong></div><div className="topbar-right"><span className={`engine-status ${engineStatus}`}><span />{mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? 'Online chess' : engineStatus === 'loading' ? 'Loading Stockfish' : engineStatus === 'error' ? 'Engine needs attention' : 'Stockfish ready'}</span><button className="help-button icon-button" aria-label="Help" onClick={() => setDialog('help')}><CircleHelp size={19} /></button><div className="top-avatar">Y</div></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={22} /></button><span>{puzzlesOpen ? 'Practise' : 'Play'}</span><ChevronRight size={14} /><strong>{puzzlesOpen ? 'Puzzles' : mode === 'bot' ? 'Computer' : mode === 'local' ? 'Local game' : mode === 'online' ? 'Online game' : 'Analysis board'}</strong></div><div className="topbar-right"><span className={`engine-status ${engineStatus}`}><span />{puzzlesOpen ? 'A fresh challenge every day' : mode === 'online' && !onlineCheats && online.room?.status !== 'finished' ? 'Online chess' : engineStatus === 'loading' ? 'Loading Stockfish' : engineStatus === 'error' ? 'Engine needs attention' : 'Stockfish ready'}</span><button className="help-button icon-button" aria-label="Help" onClick={() => setDialog('help')}><CircleHelp size={19} /></button><div className="top-avatar">Y</div></div></header>
+      {puzzlesOpen ? <Suspense fallback={<div className="page-content"><p role="status">Opening your challenges…</p></div>}><PuzzleHub showLegal={showLegal} onSound={playSound} /></Suspense> : <>
       <div className="page-content">
         <div className="page-heading"><div><h1>{mode === 'analysis' ? 'Find the idea behind the move.' : 'Your next great move starts here.'}</h1><p>{mode === 'analysis' ? 'Explore any position. Understand every possibility.' : 'A worthy opponent. A fresh board. A little better with every game.'}</p></div><div className="practice-badge"><span /><span>No pressure.<br /><strong>Just practice.</strong></span></div></div>
         {engineStatus === 'error' && <div className="engine-error" role="alert"><Cpu size={20} /><span>{engineMessage}</span><button onClick={() => { setEngineRetry(n => n + 1); setBusy(false); }}>Retry engine</button></div>}
@@ -623,6 +635,7 @@ function App() {
         </div>
         <footer className="page-footer"><div><Heart size={14} /><span>Made for the love of the game.</span></div><div><span><ShieldCheck size={13} />Free to play</span><i /><span><Cpu size={13} />Powered by Stockfish</span><button onClick={() => setDialog('help')}>About & credits <ArrowUpRight size={12} /></button></div></footer>
       </div>
+      </>}
     </main>
 
     <dialog ref={dialogRef} aria-label={dialog === 'import' ? 'Import a game' : dialog === 'settings' ? 'Board settings' : dialog === 'games' ? 'Saved games' : dialog === 'help' ? 'How to play' : dialog === 'resign' ? 'Resign game' : 'Start a new game'} className={`app-dialog ${dialog === 'games' ? 'wide-dialog' : ''}`} onCancel={() => { setDialog(null); setPendingMode(null); }} onClick={event => { if (event.target === event.currentTarget) { setDialog(null); setPendingMode(null); } }}>
